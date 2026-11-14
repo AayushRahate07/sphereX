@@ -13,11 +13,21 @@ An interactive web viewer for multi-epoch, multi-wavelength cutouts from NASA's 
 - **Member 2 (Player, controls, and sky map — This Module)**:
   - High-performance HTML5 Canvas multi-epoch blink player.
   - Client-side real-time stretch (Linear, Logarithmic) and Invert controls running directly on raw pixel values.
-  - Test target presets (WISE 0855, Barnard's Star, Epsilon Indi B, RW Aurigae, R Draconis).
+  - Aladin Lite interactive all-sky map picker (DSS2, 2MASS, AllWISE surveys).
+  - Astronomical search box (object name resolution and decimal/sexagesimal coordinate parsing).
+  - Challenge test target presets (WISE 0855, Barnard's Star, Epsilon Indi B, RW Aurigae, R Draconis).
   - Shareable and embeddable URL state (`?ra=&dec=&size=&band=&speed=&stretch=&invert=`).
+  - View Mode switching (Blink Sequence, Difference View, Stacking View).
   - Seamless toggle between local sample file (fake moving dot) and Member 1's `/api/frames` endpoint.
 - **Member 3 (Analysis features and checks)**:
   - Standalone pure functions in `src/analysis/` for stacking, difference view, shift-and-stack, and light curves.
+
+---
+
+## Next Checkpoint Steps
+
+- **Checkpoint 3 (Handoff with Member 1)**: As soon as Member 1 posts the first-hours checks (target frame counts, which detectors show WISE 0855, and the deployed `/api/frames` endpoint), we can switch the data source toggle to Member 1's live endpoint and test the 5 targets end-to-end.
+- **Checkpoint 5 (Handoff with Member 3)**: When Member 3 finishes their standalone functions, they drop directly into `src/analysis/index.ts` to power the Difference, Stacking, and Shift-and-Stack modes.
 
 ---
 
