@@ -23,7 +23,7 @@ DEFAULT_FOV_DEG = 0.05
 DEFAULT_PLATE_SCALE_DEG = 0.001712  # ~6.1632 arcsec/pixel
 DEFAULT_BAND = "SPHEREx-D6"
 DEFAULT_RELEASE = "DR1"
-DEFAULT_MAX_FRAMES = 10
+DEFAULT_MAX_FRAMES = 5
 ABSOLUTE_MAX_FRAMES = 50
 
 # Supported detector bands strictly aligned with src/types/spherex.ts

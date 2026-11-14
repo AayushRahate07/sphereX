@@ -7,7 +7,7 @@ import type { SpherexApiResponse, SpherexBand } from '../types/spherex';
 const DEFAULT_BASE_URL =
   typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL
     ? import.meta.env.VITE_API_BASE_URL
-    : 'http://localhost:8000';
+    : 'http://127.0.0.1:8000';
 
 export const API_CONFIG = {
   // Member 1 FastAPI server base URL (configured via VITE_API_BASE_URL or settings)
@@ -33,7 +33,7 @@ export async function fetchSpherexSequence(params: {
     band = 'SPHEREx-D6',
     release = 'DR1',
     maxFrames,
-    timeoutMs = 30000,
+    timeoutMs = 120000,
     signal,
   } = params;
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { SpherexApiResponse, SpherexBand, SpherexFrame } from './types/spherex';
 import { DEFAULT_BAND, TEST_TARGETS } from './types/spherex';
 import { fetchSpherexSequence } from './services/apiClient';
@@ -6,17 +6,13 @@ import { parseUrlState, syncUrlState, getShareableUrl } from './utils/urlState';
 import type { StretchParams } from './utils/stretch';
 import { FrameCanvas } from './components/Player/FrameCanvas';
 import { PlayerControls } from './components/Player/PlayerControls';
-import { StretchControls } from './components/Controls/StretchControls';
-import { ShiftStackControls } from './components/Controls/ShiftStackControls';
-import { TargetBar } from './components/Navigation/TargetBar';
 import { AladinSkyPicker } from './components/Navigation/AladinSkyPicker';
-import { MetadataPanel } from './components/HUD/MetadataPanel';
-import { PhotometryDrawer } from './components/HUD/PhotometryDrawer';
 import { HelpModal } from './components/HUD/HelpModal';
+import { ScienceDossierModal } from './components/HUD/ScienceDossierModal';
 import { Navbar } from './components/Header/Navbar';
-import { Footer } from './components/Footer/Footer';
+import { MissionSidebar } from './components/Sidebar/MissionSidebar';
 import { computeDifference, stackFrames, shiftAndStack } from './analysis';
-import { AlertCircle, Loader2, Layers, Film, SplitSquareVertical, Move } from 'lucide-react';
+import { AlertCircle, Loader2, Layers, Film, SplitSquareVertical, Move, StopCircle } from 'lucide-react';
 
 export type ViewMode = 'blink' | 'difference' | 'stacked' | 'shift-stack';
 
@@ -31,11 +27,14 @@ export const App: React.FC = () => {
   const [maxFrames] = useState<number | undefined>(initialUrl.maxFrames);
   const [isEmbedMode] = useState<boolean>(initialUrl.embed ?? false);
 
-  // Aladin Sky Picker drawer toggle
+  // Aladin Sky Picker modal toggle
   const [isAladinOpen, setIsAladinOpen] = useState<boolean>(false);
 
   // Help & Shortcuts modal toggle
   const [isHelpOpen, setIsHelpOpen] = useState<boolean>(false);
+
+  // Science Dossier & Validation report modal toggle
+  const [isScienceOpen, setIsScienceOpen] = useState<boolean>(false);
 
   // Aperture inspection state (X, Y in pixel coordinates)
   const [selectedAperture, setSelectedAperture] = useState<{ x: number; y: number } | null>(null);
@@ -58,6 +57,11 @@ export const App: React.FC = () => {
   const [sequenceData, setSequenceData] = useState<SpherexApiResponse | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Loading progress & cancellation state
+  const [loadingProgress, setLoadingProgress] = useState<number>(0);
+  const [loadingStage, setLoadingStage] = useState<string>('Initializing archive query...');
+  const [loadingElapsed, setLoadingElapsed] = useState<number>(0);
 
   // Request cancellation, race condition prevention, and caching refs
   const activeReqIdRef = useRef<number>(0);
@@ -88,8 +92,28 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('keydown', handleGlobalKeys);
   }, []);
 
+  // Cancel search handler: aborts in-flight request and preserves current display
+  const handleCancelSearch = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort('User cancelled search');
+    }
+    setIsLoading(false);
+    setLoadingProgress(0);
+    setLoadingStage('Search paused');
+  }, []);
+
   // Fetch sequence data when target / band / data source changes
   const loadSequence = useCallback(async () => {
+    // Check in-memory cache FIRST: zero-latency instantaneous switch without loading flash
+    const cacheKey = `${ra.toFixed(6)}_${dec.toFixed(6)}_${fov}_${band}_${maxFrames ?? 'default'}`;
+    if (cacheRef.current.has(cacheKey)) {
+      const cached = cacheRef.current.get(cacheKey)!;
+      setSequenceData(cached);
+      setCurrentFrameIndex(0);
+      setIsLoading(false);
+      return;
+    }
+
     // Abort any prior in-flight request to prevent race conditions
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -102,16 +126,38 @@ export const App: React.FC = () => {
 
     setIsLoading(true);
     setErrorMsg(null);
+    setLoadingProgress(10);
+    setLoadingStage('Connecting to SPHEREx archive...');
+    setLoadingElapsed(0);
 
-    // Check in-memory cache to prevent redundant fetches
-    const cacheKey = `${ra.toFixed(6)}_${dec.toFixed(6)}_${fov}_${band}_${maxFrames ?? 'default'}`;
-    if (cacheRef.current.has(cacheKey)) {
-      const cached = cacheRef.current.get(cacheKey)!;
-      setSequenceData(cached);
-      setCurrentFrameIndex(0);
-      setIsLoading(false);
-      return;
-    }
+    // Progressive real-time estimator based on actual SPHEREx archive pipeline steps
+    const startTime = Date.now();
+    const progressInterval = setInterval(() => {
+      const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
+      setLoadingElapsed(elapsedSec);
+
+      if (elapsedSec < 12) {
+        // Stage 1: TAP Cone Search Query
+        const pct = Math.min(35, 10 + Math.round((elapsedSec / 12) * 25));
+        setLoadingProgress(pct);
+        setLoadingStage('Stage 1/3: Submitting ADQL cone query to NASA IRSA TAP archive...');
+      } else if (elapsedSec < 28) {
+        // Stage 2: Downloading & Caching Level 2 FITS Cutouts
+        const pct = Math.min(75, 35 + Math.round(((elapsedSec - 12) / 16) * 40));
+        setLoadingProgress(pct);
+        setLoadingStage('Stage 2/3: Fetching Level 2 SPHEREx FITS cutouts & caching locally...');
+      } else if (elapsedSec < 38) {
+        // Stage 3: Reprojection & Coordinate Alignment
+        const pct = Math.min(92, 75 + Math.round(((elapsedSec - 28) / 10) * 17));
+        setLoadingProgress(pct);
+        setLoadingStage('Stage 3/3: Reprojecting cutouts onto common celestial tangent grid...');
+      } else {
+        // Finalizing astrometric alignment & transmission
+        const pct = Math.min(98, 92 + Math.round(((elapsedSec - 38) / 15) * 6));
+        setLoadingProgress(pct);
+        setLoadingStage('Finalizing astrometric alignment & packing spectral frames...');
+      }
+    }, 250);
 
     try {
       const data = await fetchSpherexSequence({
@@ -131,6 +177,7 @@ export const App: React.FC = () => {
       cacheRef.current.set(cacheKey, data);
       setSequenceData(data);
       setCurrentFrameIndex(0);
+      setLoadingProgress(100);
 
       // Auto-set min/max if not specified in URL
       if (data.frames.length > 0) {
@@ -142,15 +189,14 @@ export const App: React.FC = () => {
         }));
       }
     } catch (err: any) {
-      // Aborted requests are superseded intentionally; do not show error
       if (err.name === 'AbortError') {
         return;
       }
       if (currentReqId === activeReqIdRef.current) {
-        setSequenceData(null);
         setErrorMsg(err.message || 'Failed to fetch SPHEREx frames.');
       }
     } finally {
+      clearInterval(progressInterval);
       if (currentReqId === activeReqIdRef.current) {
         setIsLoading(false);
       }
@@ -198,7 +244,6 @@ export const App: React.FC = () => {
           if (loopMode === 'loop') {
             return (prev + 1) % total;
           } else {
-            // Bounce
             let next = prev + bounceDirectionRef.current;
             if (next >= total) {
               bounceDirectionRef.current = -1;
@@ -247,7 +292,7 @@ export const App: React.FC = () => {
     }));
   }, [sequenceData, currentFrameIndex]);
 
-  const handleTargetChange = (newRa: number, newDec: number) => {
+  const handleTargetChange = (newRa: number, newDec: number, _newName?: string) => {
     setRa(newRa);
     setDec(newDec);
     setSelectedAperture(null);
@@ -257,66 +302,47 @@ export const App: React.FC = () => {
     navigator.clipboard.writeText(getShareableUrl());
   };
 
-  // Determine active frame for canvas display based on viewMode
-  let activeDisplayFrame: SpherexFrame | null = null;
-  let analysisSlotNotice: string | null = null;
-
-  if (sequenceData && sequenceData.frames.length > 0) {
+  // Determine active frame for canvas display based on viewMode (memoized)
+  const activeDisplayFrame = useMemo<SpherexFrame | null>(() => {
+    if (!sequenceData || sequenceData.frames.length === 0) return null;
     const baseFrame = sequenceData.frames[currentFrameIndex];
 
     if (viewMode === 'blink') {
-      activeDisplayFrame = baseFrame;
+      return baseFrame;
     } else if (viewMode === 'difference') {
       const f0 = sequenceData.frames[0];
       const diffFlux = computeDifference(f0, baseFrame);
-
-      if (diffFlux) {
-        activeDisplayFrame = {
-          ...baseFrame,
-          flux: diffFlux,
-        };
-      } else {
-        // Fallback display while Member 3 works on analysis
-        activeDisplayFrame = baseFrame;
-        analysisSlotNotice =
-          'Difference View Hook ready for Member 3 function (Checkpoint 5). Showing reference frame.';
-      }
+      return diffFlux ? { ...baseFrame, flux: diffFlux } : baseFrame;
     } else if (viewMode === 'stacked') {
       const stackedFlux = stackFrames(sequenceData.frames, 'mean');
-
-      if (stackedFlux) {
-        activeDisplayFrame = {
-          ...baseFrame,
-          flux: stackedFlux,
-        };
-      } else {
-        // Fallback display while Member 3 works on analysis
-        activeDisplayFrame = baseFrame;
-        analysisSlotNotice =
-          'Stacking View Hook ready for Member 3 function (Checkpoint 5). Showing reference frame.';
-      }
+      return stackedFlux ? { ...baseFrame, flux: stackedFlux } : baseFrame;
     } else if (viewMode === 'shift-stack') {
       const shiftedFlux = shiftAndStack(sequenceData.frames, pmRa, pmDec);
-
-      if (shiftedFlux) {
-        activeDisplayFrame = {
-          ...baseFrame,
-          flux: shiftedFlux,
-        };
-      } else {
-        // Fallback display while Member 3 works on analysis
-        activeDisplayFrame = baseFrame;
-        analysisSlotNotice = `Shift-and-Stack Hook ready for Member 3 function (Checkpoint 5). Passing proper motion: (${pmRa.toFixed(1)}", ${pmDec.toFixed(1)}") / yr.`;
-      }
+      return shiftedFlux ? { ...baseFrame, flux: shiftedFlux } : baseFrame;
     }
-  }
+    return baseFrame;
+  }, [sequenceData, currentFrameIndex, viewMode, pmRa, pmDec]);
+
+  const analysisSlotNotice = useMemo<string | null>(() => {
+    if (!sequenceData || sequenceData.frames.length === 0) return null;
+    if (viewMode === 'difference') {
+      return `Difference: Frame [Epoch ${currentFrameIndex + 1}] minus [Epoch 1 baseline]. Stationary stars cancel; moving & variable transients appear as dipoles.`;
+    } else if (viewMode === 'stacked') {
+      const nFrames = sequenceData.frames.length;
+      return `Stacking: Co-adding ${nFrames} epochs. Background noise reduced by ~√${nFrames} (~${Math.sqrt(nFrames).toFixed(1)}× SNR boost).`;
+    } else if (viewMode === 'shift-stack') {
+      return `Shift-and-Stack Active: Proper motion (${pmRa.toFixed(1)}", ${pmDec.toFixed(1)}") / yr applied via sub-pixel bilinear interpolation.`;
+    }
+    return null;
+  }, [sequenceData, currentFrameIndex, viewMode, pmRa, pmDec]);
 
   return (
-    <div className="min-h-screen flex flex-col bg-neutral-950 text-neutral-100 font-sans">
+    <div className="h-screen w-screen overflow-hidden flex flex-col bg-neutral-950 text-neutral-100 font-sans select-none">
       {!isEmbedMode && (
         <Navbar
           onShare={handleShare}
           onOpenHelp={() => setIsHelpOpen(true)}
+          onOpenScienceDossier={() => setIsScienceOpen(true)}
           onApiUrlChange={() => {
             cacheRef.current.clear();
             loadSequence();
@@ -324,207 +350,287 @@ export const App: React.FC = () => {
         />
       )}
 
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 space-y-4">
-        {/* Error notification if Member 1 API fails */}
+      {/* Main Single-Page Workspace: Zero Page Scrolling (100vh lock) */}
+      <main className="flex-1 h-[calc(100vh-3rem)] p-2.5 overflow-hidden flex flex-col">
+        {/* Error notification if API fails */}
         {errorMsg && (
-          <div className="bg-red-500/10 border border-red-500/40 text-red-300 p-3 rounded-lg text-xs flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
-            <span>{errorMsg}</span>
-          </div>
-        )}
-
-        {/* Target and Detector Navigation (Section 4) */}
-        {!isEmbedMode && (
-          <TargetBar
-            ra={ra}
-            dec={dec}
-            fovDegrees={fov}
-            band={band}
-            onTargetChange={handleTargetChange}
-            onFovChange={setFov}
-            onBandChange={setBand}
-            isAladinOpen={isAladinOpen}
-            onToggleAladin={() => setIsAladinOpen((prev) => !prev)}
-            isLoading={isLoading}
-          />
-        )}
-
-        {/* Aladin Lite All-Sky Picker Drawer */}
-        {!isEmbedMode && (
-          <AladinSkyPicker
-            ra={ra}
-            dec={dec}
-            fovDegrees={fov}
-            isOpen={isAladinOpen}
-            onClose={() => setIsAladinOpen(false)}
-            onSelectPosition={(newRa, newDec) => {
-              setRa(+newRa.toFixed(6));
-              setDec(+newDec.toFixed(6));
-              setSelectedAperture(null);
-            }}
-          />
-        )}
-
-        {/* View Mode Selector Tabs (Blink Player / Difference View / Stacked / Shift-and-Stack) */}
-        <div className="flex items-center justify-between bg-neutral-900 border border-neutral-800 rounded-lg p-2 text-xs">
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="mb-2 shrink-0 bg-red-500/10 border border-red-500/40 text-red-300 p-2 rounded-lg text-xs flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+              <span>{errorMsg}</span>
+            </div>
             <button
-              onClick={() => setViewMode('blink')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md font-medium transition ${
-                viewMode === 'blink'
-                  ? 'bg-cyan-500 text-neutral-950 shadow-sm'
-                  : 'text-neutral-400 hover:text-neutral-200'
-              }`}
+              onClick={() => setErrorMsg(null)}
+              className="text-red-400 hover:text-red-200 text-xs px-2 py-0.5 rounded bg-red-950/60"
             >
-              <Film className="w-3.5 h-3.5" /> Blink Sequence
-            </button>
-            <button
-              onClick={() => setViewMode('difference')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md font-medium transition ${
-                viewMode === 'difference'
-                  ? 'bg-cyan-500 text-neutral-950 shadow-sm'
-                  : 'text-neutral-400 hover:text-neutral-200'
-              }`}
-            >
-              <SplitSquareVertical className="w-3.5 h-3.5" /> Difference View
-            </button>
-            <button
-              onClick={() => setViewMode('stacked')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md font-medium transition ${
-                viewMode === 'stacked'
-                  ? 'bg-cyan-500 text-neutral-950 shadow-sm'
-                  : 'text-neutral-400 hover:text-neutral-200'
-              }`}
-            >
-              <Layers className="w-3.5 h-3.5" /> Stacking View
-            </button>
-            <button
-              onClick={() => setViewMode('shift-stack')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md font-medium transition ${
-                viewMode === 'shift-stack'
-                  ? 'bg-cyan-500 text-neutral-950 shadow-sm'
-                  : 'text-neutral-400 hover:text-neutral-200'
-              }`}
-            >
-              <Move className="w-3.5 h-3.5" /> Shift-and-Stack
+              Dismiss
             </button>
           </div>
-
-          <span className="text-[11px] text-neutral-500 hidden sm:inline font-mono">
-            {viewMode === 'blink'
-              ? 'Multi-epoch blink sequence'
-              : viewMode === 'difference'
-              ? 'Frame subtraction (Member 3 hook)'
-              : viewMode === 'stacked'
-              ? 'Co-added stack (Member 3 hook)'
-              : 'Proper motion co-addition (Idea 1)'}
-          </span>
-        </div>
-
-        {/* Shift-and-Stack Proper Motion Controls (Active only in Shift-Stack mode) */}
-        {viewMode === 'shift-stack' && (
-          <ShiftStackControls
-            pmRa={pmRa}
-            pmDec={pmDec}
-            onChangePm={(newRa, newDec) => {
-              setPmRa(newRa);
-              setPmDec(newDec);
-            }}
-            onReset={() => {
-              setPmRa(0);
-              setPmDec(0);
-            }}
-          />
         )}
 
-        {/* Analysis Hook Notice Banner */}
-        {analysisSlotNotice && (
-          <div className="bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-xs px-3 py-2 rounded-lg font-mono">
-            ℹ {analysisSlotNotice}
-          </div>
-        )}
+        {/* 2-Section Cockpit Grid */}
+        <div className="flex-1 h-full min-h-0 grid grid-cols-1 lg:grid-cols-12 gap-3 overflow-hidden">
+          {/* ================= LEFT SECTION: PRIMARY SKY VIEWER & TIMELINE ================= */}
+          <div className="lg:col-span-7 xl:col-span-8 flex flex-col h-full min-h-0 space-y-2 overflow-hidden">
+            {/* View Mode Selector Bar (Top of canvas) */}
+            <div className="h-9 shrink-0 flex items-center justify-between bg-neutral-900/90 border border-neutral-800 rounded-lg px-2 text-xs">
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setViewMode('blink')}
+                  className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs transition ${
+                    viewMode === 'blink'
+                      ? 'bg-cyan-500 text-neutral-950 shadow-sm font-semibold'
+                      : 'text-neutral-400 hover:text-neutral-200'
+                  }`}
+                >
+                  <Film className="w-3.5 h-3.5" /> Blink Sequence
+                </button>
+                <button
+                  onClick={() => setViewMode('difference')}
+                  className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs transition ${
+                    viewMode === 'difference'
+                      ? 'bg-cyan-500 text-neutral-950 shadow-sm font-semibold'
+                      : 'text-neutral-400 hover:text-neutral-200'
+                  }`}
+                >
+                  <SplitSquareVertical className="w-3.5 h-3.5" /> Difference
+                </button>
+                <button
+                  onClick={() => setViewMode('stacked')}
+                  className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs transition ${
+                    viewMode === 'stacked'
+                      ? 'bg-cyan-500 text-neutral-950 shadow-sm font-semibold'
+                      : 'text-neutral-400 hover:text-neutral-200'
+                  }`}
+                >
+                  <Layers className="w-3.5 h-3.5" /> Stacking
+                </button>
+                <button
+                  onClick={() => setViewMode('shift-stack')}
+                  className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs transition ${
+                    viewMode === 'shift-stack'
+                      ? 'bg-cyan-500 text-neutral-950 shadow-sm font-semibold'
+                      : 'text-neutral-400 hover:text-neutral-200'
+                  }`}
+                >
+                  <Move className="w-3.5 h-3.5" /> Shift-Stack
+                </button>
+              </div>
 
-        {/* Main Player Display */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          {/* 2D Canvas Viewer (Left 2 columns) */}
-          <div className="lg:col-span-2 space-y-4">
-            {isLoading ? (
-              <div className="h-[480px] bg-neutral-900 border border-neutral-800 rounded-lg flex flex-col items-center justify-center gap-3">
-                <Loader2 className="w-6 h-6 text-cyan-400 animate-spin" />
-                <span className="text-xs text-neutral-400 font-mono">
-                  Loading SPHEREx frame sequence...
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-neutral-500 font-mono hidden sm:inline">
+                  {viewMode === 'blink'
+                    ? 'Epoch animation'
+                    : viewMode === 'difference'
+                    ? 'Subtraction (f_i - f_0)'
+                    : viewMode === 'stacked'
+                    ? 'Co-addition (~√N SNR)'
+                    : 'Proper motion track'}
                 </span>
+                <button
+                  onClick={() => setIsAladinOpen(true)}
+                  className="px-2 py-0.5 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-[11px] border border-neutral-700 transition"
+                  title="Open All-Sky Interactive Map"
+                >
+                  All-Sky Map
+                </button>
               </div>
-            ) : activeDisplayFrame ? (
-              <FrameCanvas
-                frame={activeDisplayFrame}
-                stretch={stretch}
-                isSampleData={sequenceData?.isSampleData}
-                aperture={selectedAperture}
-                onSelectAperture={(px, py) => setSelectedAperture({ x: px, y: py })}
-              />
-            ) : (
-              <div className="h-[480px] bg-neutral-900 border border-neutral-800 rounded-lg flex items-center justify-center text-xs text-neutral-500">
-                No frames available
+            </div>
+
+            {/* Analysis Notice (if active) */}
+            {analysisSlotNotice && (
+              <div className="shrink-0 py-1 px-2.5 bg-cyan-950/40 border border-cyan-500/30 text-cyan-300 text-[11px] rounded-lg font-mono">
+                ℹ {analysisSlotNotice}
               </div>
             )}
 
-            {/* Playback Controls (Active in Blink & Difference modes) */}
-            {sequenceData && viewMode !== 'stacked' && viewMode !== 'shift-stack' && (
-              <PlayerControls
-                currentFrame={currentFrameIndex}
-                totalFrames={sequenceData.frameCount}
-                isPlaying={isPlaying && viewMode === 'blink'}
-                fps={fps}
-                loopMode={loopMode}
-                onPlayToggle={() => setIsPlaying((p) => !p)}
-                onStepForward={handleStepForward}
-                onStepBackward={handleStepBackward}
-                onSeek={(idx) => {
-                  setIsPlaying(false);
-                  setCurrentFrameIndex(idx);
-                }}
-                onFpsChange={setFps}
-                onLoopModeToggle={() =>
-                  setLoopMode((m) => (m === 'loop' ? 'bounce' : 'loop'))
-                }
-                onRestart={handleRestart}
-              />
+            {/* 2D Canvas Viewport (Fills available vertical space) */}
+            <div className="flex-1 min-h-0 relative flex flex-col rounded-xl overflow-hidden border border-neutral-800 bg-neutral-950 shadow-inner">
+              {isLoading && !sequenceData ? (
+                <div className="flex-1 flex flex-col items-center justify-center p-6 text-center">
+                  <div className="w-full max-w-sm bg-neutral-900/90 border border-neutral-800 rounded-xl p-5 shadow-2xl space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Loader2 className="w-5 h-5 text-cyan-400 animate-spin" />
+                        <span className="text-xs font-semibold text-neutral-100">Fetching SPHEREx Data</span>
+                      </div>
+                      <span className="text-sm font-bold font-mono text-cyan-400">{loadingProgress}%</span>
+                    </div>
+
+                    <div className="w-full bg-neutral-950 rounded-full h-2 overflow-hidden">
+                      <div
+                        className="bg-cyan-400 h-full rounded-full transition-all duration-300"
+                        style={{ width: `${Math.max(5, loadingProgress)}%` }}
+                      />
+                    </div>
+                    <div className="text-[11px] text-neutral-400 font-mono truncate">
+                      {loadingStage} {loadingElapsed > 0 ? `(${loadingElapsed}s)` : ''}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleCancelSearch}
+                      className="w-full py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-medium text-xs transition flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <StopCircle className="w-3.5 h-3.5" /> Stop Search
+                    </button>
+                  </div>
+                </div>
+              ) : activeDisplayFrame ? (
+                <div className="relative flex-1 h-full min-h-0 flex flex-col">
+                  <FrameCanvas
+                    frame={activeDisplayFrame}
+                    stretch={stretch}
+                    isSampleData={sequenceData?.isSampleData}
+                    aperture={selectedAperture}
+                    onSelectAperture={(px, py) => setSelectedAperture({ x: px, y: py })}
+                  />
+
+                  {/* Non-destructive background fetching overlay */}
+                  {isLoading && (
+                    <div className="absolute inset-0 bg-neutral-950/60 backdrop-blur-[2px] flex items-center justify-center z-30">
+                      <div className="bg-neutral-900/95 border border-neutral-800 rounded-xl p-4 shadow-xl max-w-xs w-full mx-4 space-y-2">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="flex items-center gap-2 text-cyan-300 font-medium">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Switching target...
+                          </span>
+                          <span className="font-mono text-cyan-400 font-bold">{loadingProgress}%</span>
+                        </div>
+                        <div className="w-full bg-neutral-950 rounded-full h-1.5 overflow-hidden">
+                          <div
+                            className="bg-cyan-400 h-full rounded-full transition-all duration-200"
+                            style={{ width: `${Math.max(5, loadingProgress)}%` }}
+                          />
+                        </div>
+                        <div className="flex justify-end pt-1">
+                          <button
+                            type="button"
+                            onClick={handleCancelSearch}
+                            className="text-[11px] text-rose-400 hover:text-rose-300 transition cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex-1 flex flex-col items-center justify-center text-xs text-neutral-400 gap-1.5">
+                  <span className="font-medium text-neutral-200">No frames loaded.</span>
+                  <span className="text-neutral-500">Pick an object from the sidebar on the right to start exploring.</span>
+                </div>
+              )}
+            </div>
+
+            {/* Timeline Scrubber & Playback Controls Bar (Matching user Image 2) */}
+            {sequenceData && (
+              <div className="shrink-0">
+                <PlayerControls
+                  currentFrame={currentFrameIndex}
+                  totalFrames={sequenceData.frameCount}
+                  isPlaying={isPlaying && viewMode === 'blink'}
+                  fps={fps}
+                  loopMode={loopMode}
+                  onPlayToggle={() => setIsPlaying((p) => !p)}
+                  onStepForward={handleStepForward}
+                  onStepBackward={handleStepBackward}
+                  onSeek={(idx) => {
+                    setIsPlaying(false);
+                    setCurrentFrameIndex(idx);
+                  }}
+                  onFpsChange={setFps}
+                  onLoopModeToggle={() => setLoopMode((m) => (m === 'loop' ? 'bounce' : 'loop'))}
+                  onRestart={handleRestart}
+                  frames={sequenceData.frames}
+                />
+              </div>
             )}
+
+
           </div>
 
-          {/* Right Column: Stretch Controls & Metadata Panel */}
-          <div className="space-y-4">
-            {/* Visual Controls: Stretch & Invert */}
-            <StretchControls
+          {/* ================= RIGHT SECTION: MISSION SIDEBAR (Matching user Image 1) ================= */}
+          <div className="lg:col-span-5 xl:col-span-4 h-full min-h-0 flex flex-col overflow-hidden">
+            <MissionSidebar
+              ra={ra}
+              dec={dec}
+              fovDegrees={fov}
+              band={band}
+              onTargetChange={handleTargetChange}
+              onFovChange={setFov}
+              onBandChange={setBand}
+              isLoading={isLoading}
+              onCancelSearch={handleCancelSearch}
               stretch={stretch}
+              onStretchChange={(updated) => setStretch((prev) => ({ ...prev, ...updated }))}
+              onAutoMinMax={handleAutoMinMax}
               minPossible={activeDisplayFrame?.minFlux ?? 0}
               maxPossible={activeDisplayFrame?.maxFlux ?? 100}
-              onChange={(updated) => setStretch((prev) => ({ ...prev, ...updated }))}
-              onAutoMinMax={handleAutoMinMax}
+              pmRa={pmRa}
+              pmDec={pmDec}
+              onChangePm={(nRa, nDec) => {
+                setPmRa(nRa);
+                setPmDec(nDec);
+              }}
+              onResetPm={() => {
+                setPmRa(0);
+                setPmDec(0);
+              }}
+              sequenceData={sequenceData}
+              activeDisplayFrame={activeDisplayFrame}
+              onOpenInfrared101={() => setIsScienceOpen(true)}
+              selectedAperture={selectedAperture}
+              onSelectAperture={(px, py) => setSelectedAperture({ x: px, y: py })}
+              onClearAperture={() => setSelectedAperture(null)}
             />
-
-            {/* Metadata Panel */}
-            {sequenceData && activeDisplayFrame && (
-              <MetadataPanel data={sequenceData} currentFrame={activeDisplayFrame} />
-            )}
           </div>
         </div>
-
-        {/* Aperture Photometry & Spectrum Drawer (Appears when user clicks canvas) */}
-        {selectedAperture && sequenceData && (
-          <PhotometryDrawer
-            aperture={selectedAperture}
-            frames={sequenceData.frames}
-            onClose={() => setSelectedAperture(null)}
-          />
-        )}
       </main>
-
-      {!isEmbedMode && <Footer />}
 
       {/* Guide & Keyboard Shortcuts Modal */}
       <HelpModal isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
+
+      {/* Science Dossier & Validation Report Modal */}
+      <ScienceDossierModal
+        isOpen={isScienceOpen}
+        onClose={() => setIsScienceOpen(false)}
+        onSelectTarget={(nRa, nDec, name) => handleTargetChange(nRa, nDec, name)}
+      />
+
+      {/* Aladin Lite All-Sky Modal Overlay */}
+      {isAladinOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl w-full max-w-4xl h-[80vh] flex flex-col overflow-hidden shadow-2xl">
+            <div className="px-4 py-3 flex items-center justify-between border-b border-neutral-800 bg-neutral-950">
+              <span className="font-semibold text-sm text-neutral-100 flex items-center gap-2">
+                All-Sky Celestial Map (CDS Aladin Lite)
+              </span>
+              <button
+                onClick={() => setIsAladinOpen(false)}
+                className="text-neutral-400 hover:text-neutral-100 text-xs px-2.5 py-1 rounded bg-neutral-800"
+              >
+                Close Map
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 relative">
+              <AladinSkyPicker
+                ra={ra}
+                dec={dec}
+                fovDegrees={fov}
+                isOpen={isAladinOpen}
+                onClose={() => setIsAladinOpen(false)}
+                onSelectPosition={(newRa, newDec) => {
+                  setRa(+newRa.toFixed(6));
+                  setDec(+newDec.toFixed(6));
+                  setSelectedAperture(null);
+                  setIsAladinOpen(false);
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

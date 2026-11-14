@@ -46,6 +46,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["frames"])
 
+# In-memory response cache for sub-millisecond repeated queries
+_RESPONSE_CACHE: Dict[str, SpherexApiResponse] = {}
+
+
+def clear_frames_cache() -> None:
+    """Clear in-memory response cache."""
+    _RESPONSE_CACHE.clear()
+
 
 @router.get(
     "/frames",
@@ -74,6 +82,11 @@ def get_frames(
         )
 
     preset_name = get_target_name_if_preset(ra, dec)
+    cache_key = f"{preset_name or f'{ra:.5f}_{dec:.5f}'}_{size:.4f}_{band}_{release}_{max_frames}"
+    if cache_key in _RESPONSE_CACHE:
+        logger.info("Serving frames from in-memory response cache for %s", cache_key)
+        return _RESPONSE_CACHE[cache_key]
+
     astro = get_target_astrometry(ra, dec, name=preset_name)
 
     # 2. Observation Selection
@@ -277,7 +290,7 @@ def get_frames(
         )
     ]
 
-    return SpherexApiResponse(
+    resp_obj = SpherexApiResponse(
         target=target_info,
         fovDegrees=size,
         band=band,  # type: ignore[arg-type]
@@ -288,3 +301,7 @@ def get_frames(
         markers=markers,
         isSampleData=False,
     )
+    if len(_RESPONSE_CACHE) > 100:
+        _RESPONSE_CACHE.clear()
+    _RESPONSE_CACHE[cache_key] = resp_obj
+    return resp_obj
