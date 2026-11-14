@@ -1,0 +1,24 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest / testing caches
+.pytest_cache/
+.coverage
+htmlcov/
+test_fits_scratch/
+
+# Generated output and demo folders
+output/
+output_*/
+demo_*/
+*.fits
+fits_survey/
+
+# OS and Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

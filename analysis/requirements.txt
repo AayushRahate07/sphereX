@@ -1,0 +1,8 @@
+# SPHEREx Sky Viewer — Member 3 Dependencies
+# Python >= 3.10
+numpy>=1.24.0
+scipy>=1.10.0
+astropy>=6.0.0
+photutils>=1.9.0
+matplotlib>=3.7.0
+pytest>=7.0.0
