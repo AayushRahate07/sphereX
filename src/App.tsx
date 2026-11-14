@@ -7,15 +7,18 @@ import type { StretchParams } from './utils/stretch';
 import { FrameCanvas } from './components/Player/FrameCanvas';
 import { PlayerControls } from './components/Player/PlayerControls';
 import { StretchControls } from './components/Controls/StretchControls';
+import { ShiftStackControls } from './components/Controls/ShiftStackControls';
 import { TargetBar } from './components/Navigation/TargetBar';
 import { AladinSkyPicker } from './components/Navigation/AladinSkyPicker';
 import { MetadataPanel } from './components/HUD/MetadataPanel';
+import { PhotometryDrawer } from './components/HUD/PhotometryDrawer';
+import { HelpModal } from './components/HUD/HelpModal';
 import { Navbar } from './components/Header/Navbar';
 import { Footer } from './components/Footer/Footer';
-import { computeDifference, stackFrames } from './analysis';
-import { AlertCircle, Loader2, Layers, Film, SplitSquareVertical } from 'lucide-react';
+import { computeDifference, stackFrames, shiftAndStack } from './analysis';
+import { AlertCircle, Loader2, Layers, Film, SplitSquareVertical, Move } from 'lucide-react';
 
-export type ViewMode = 'blink' | 'difference' | 'stacked';
+export type ViewMode = 'blink' | 'difference' | 'stacked' | 'shift-stack';
 
 export const App: React.FC = () => {
   // Parse initial state from URL query parameters
@@ -31,8 +34,18 @@ export const App: React.FC = () => {
   // Aladin Sky Picker drawer toggle
   const [isAladinOpen, setIsAladinOpen] = useState<boolean>(false);
 
-  // View Mode: Blink sequence vs Difference vs Stacked
+  // Help & Shortcuts modal toggle
+  const [isHelpOpen, setIsHelpOpen] = useState<boolean>(false);
+
+  // Aperture inspection state (X, Y in pixel coordinates)
+  const [selectedAperture, setSelectedAperture] = useState<{ x: number; y: number } | null>(null);
+
+  // View Mode: Blink sequence vs Difference vs Stacked vs Shift-and-Stack
   const [viewMode, setViewMode] = useState<ViewMode>('blink');
+
+  // Proper motion sliders for Shift-and-Stack
+  const [pmRa, setPmRa] = useState<number>(0);
+  const [pmDec, setPmDec] = useState<number>(0);
 
   // Playback state
   const [currentFrameIndex, setCurrentFrameIndex] = useState<number>(0);
@@ -58,6 +71,22 @@ export const App: React.FC = () => {
     max: initialUrl.max ?? 50.0,
     invert: initialUrl.invert ?? false,
   });
+
+  // Global keyboard shortcuts (M = toggle map, ? = open help)
+  useEffect(() => {
+    const handleGlobalKeys = (e: KeyboardEvent) => {
+      if (['INPUT', 'SELECT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) {
+        return;
+      }
+      if (e.key === 'm' || e.key === 'M') {
+        setIsAladinOpen((prev) => !prev);
+      } else if (e.key === '?' || (e.shiftKey && e.key === '/')) {
+        setIsHelpOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeys);
+    return () => window.removeEventListener('keydown', handleGlobalKeys);
+  }, []);
 
   // Fetch sequence data when target / band / data source changes
   const loadSequence = useCallback(async () => {
@@ -221,6 +250,7 @@ export const App: React.FC = () => {
   const handleTargetChange = (newRa: number, newDec: number) => {
     setRa(newRa);
     setDec(newDec);
+    setSelectedAperture(null);
   };
 
   const handleShare = () => {
@@ -265,6 +295,19 @@ export const App: React.FC = () => {
         analysisSlotNotice =
           'Stacking View Hook ready for Member 3 function (Checkpoint 5). Showing reference frame.';
       }
+    } else if (viewMode === 'shift-stack') {
+      const shiftedFlux = shiftAndStack(sequenceData.frames, pmRa, pmDec);
+
+      if (shiftedFlux) {
+        activeDisplayFrame = {
+          ...baseFrame,
+          flux: shiftedFlux,
+        };
+      } else {
+        // Fallback display while Member 3 works on analysis
+        activeDisplayFrame = baseFrame;
+        analysisSlotNotice = `Shift-and-Stack Hook ready for Member 3 function (Checkpoint 5). Passing proper motion: (${pmRa.toFixed(1)}", ${pmDec.toFixed(1)}") / yr.`;
+      }
     }
   }
 
@@ -273,6 +316,7 @@ export const App: React.FC = () => {
       {!isEmbedMode && (
         <Navbar
           onShare={handleShare}
+          onOpenHelp={() => setIsHelpOpen(true)}
           onApiUrlChange={() => {
             cacheRef.current.clear();
             loadSequence();
@@ -316,13 +360,14 @@ export const App: React.FC = () => {
             onSelectPosition={(newRa, newDec) => {
               setRa(+newRa.toFixed(6));
               setDec(+newDec.toFixed(6));
+              setSelectedAperture(null);
             }}
           />
         )}
 
-        {/* View Mode Selector Tabs (Blink Player / Difference View / Stacked) */}
+        {/* View Mode Selector Tabs (Blink Player / Difference View / Stacked / Shift-and-Stack) */}
         <div className="flex items-center justify-between bg-neutral-900 border border-neutral-800 rounded-lg p-2 text-xs">
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
             <button
               onClick={() => setViewMode('blink')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md font-medium transition ${
@@ -353,6 +398,16 @@ export const App: React.FC = () => {
             >
               <Layers className="w-3.5 h-3.5" /> Stacking View
             </button>
+            <button
+              onClick={() => setViewMode('shift-stack')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md font-medium transition ${
+                viewMode === 'shift-stack'
+                  ? 'bg-cyan-500 text-neutral-950 shadow-sm'
+                  : 'text-neutral-400 hover:text-neutral-200'
+              }`}
+            >
+              <Move className="w-3.5 h-3.5" /> Shift-and-Stack
+            </button>
           </div>
 
           <span className="text-[11px] text-neutral-500 hidden sm:inline font-mono">
@@ -360,9 +415,27 @@ export const App: React.FC = () => {
               ? 'Multi-epoch blink sequence'
               : viewMode === 'difference'
               ? 'Frame subtraction (Member 3 hook)'
-              : 'Co-added stack (Member 3 hook)'}
+              : viewMode === 'stacked'
+              ? 'Co-added stack (Member 3 hook)'
+              : 'Proper motion co-addition (Idea 1)'}
           </span>
         </div>
+
+        {/* Shift-and-Stack Proper Motion Controls (Active only in Shift-Stack mode) */}
+        {viewMode === 'shift-stack' && (
+          <ShiftStackControls
+            pmRa={pmRa}
+            pmDec={pmDec}
+            onChangePm={(newRa, newDec) => {
+              setPmRa(newRa);
+              setPmDec(newDec);
+            }}
+            onReset={() => {
+              setPmRa(0);
+              setPmDec(0);
+            }}
+          />
+        )}
 
         {/* Analysis Hook Notice Banner */}
         {analysisSlotNotice && (
@@ -387,6 +460,8 @@ export const App: React.FC = () => {
                 frame={activeDisplayFrame}
                 stretch={stretch}
                 isSampleData={sequenceData?.isSampleData}
+                aperture={selectedAperture}
+                onSelectAperture={(px, py) => setSelectedAperture({ x: px, y: py })}
               />
             ) : (
               <div className="h-[480px] bg-neutral-900 border border-neutral-800 rounded-lg flex items-center justify-center text-xs text-neutral-500">
@@ -395,7 +470,7 @@ export const App: React.FC = () => {
             )}
 
             {/* Playback Controls (Active in Blink & Difference modes) */}
-            {sequenceData && viewMode !== 'stacked' && (
+            {sequenceData && viewMode !== 'stacked' && viewMode !== 'shift-stack' && (
               <PlayerControls
                 currentFrame={currentFrameIndex}
                 totalFrames={sequenceData.frameCount}
@@ -435,9 +510,21 @@ export const App: React.FC = () => {
             )}
           </div>
         </div>
+
+        {/* Aperture Photometry & Spectrum Drawer (Appears when user clicks canvas) */}
+        {selectedAperture && sequenceData && (
+          <PhotometryDrawer
+            aperture={selectedAperture}
+            frames={sequenceData.frames}
+            onClose={() => setSelectedAperture(null)}
+          />
+        )}
       </main>
 
       {!isEmbedMode && <Footer />}
+
+      {/* Guide & Keyboard Shortcuts Modal */}
+      <HelpModal isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
     </div>
   );
 };

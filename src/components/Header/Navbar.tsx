@@ -1,14 +1,16 @@
 import React, { useState } from 'react';
-import { Share2, Settings, Check, Database } from 'lucide-react';
+import { Share2, Settings, Check, Database, HelpCircle } from 'lucide-react';
 import { API_CONFIG } from '../../services/apiClient';
 
 interface NavbarProps {
   onShare: () => void;
+  onOpenHelp: () => void;
   onApiUrlChange?: (newUrl: string) => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
   onShare,
+  onOpenHelp,
   onApiUrlChange,
 }) => {
   const [copied, setCopied] = useState(false);
@@ -74,6 +76,16 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <span>Share URL</span>
               </>
             )}
+          </button>
+
+          {/* Help & Guide Modal Toggle */}
+          <button
+            onClick={onOpenHelp}
+            title="Help & Shortcuts (?)"
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-xs text-neutral-300 transition"
+          >
+            <HelpCircle className="w-4 h-4 text-cyan-400" />
+            <span className="hidden sm:inline">Guide</span>
           </button>
 
           {/* Settings Modal Toggle */}
