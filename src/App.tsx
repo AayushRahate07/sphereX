@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import type { SpherexApiResponse, SpherexBand } from './types/spherex';
+import type { SpherexApiResponse, SpherexBand, SpherexFrame } from './types/spherex';
 import { DEFAULT_BAND, TEST_TARGETS } from './types/spherex';
 import { fetchSpherexSequence, API_CONFIG } from './services/apiClient';
 import { parseUrlState, syncUrlState, getShareableUrl } from './utils/urlState';
@@ -8,10 +8,14 @@ import { FrameCanvas } from './components/Player/FrameCanvas';
 import { PlayerControls } from './components/Player/PlayerControls';
 import { StretchControls } from './components/Controls/StretchControls';
 import { TargetBar } from './components/Navigation/TargetBar';
+import { AladinSkyPicker } from './components/Navigation/AladinSkyPicker';
 import { MetadataPanel } from './components/HUD/MetadataPanel';
 import { Navbar } from './components/Header/Navbar';
 import { Footer } from './components/Footer/Footer';
-import { AlertCircle, Loader2 } from 'lucide-react';
+import { computeDifference, stackFrames } from './analysis';
+import { AlertCircle, Loader2, Layers, Film, SplitSquareVertical } from 'lucide-react';
+
+export type ViewMode = 'blink' | 'difference' | 'stacked';
 
 export const App: React.FC = () => {
   // Parse initial state from URL query parameters
@@ -22,6 +26,12 @@ export const App: React.FC = () => {
   const [fov, setFov] = useState<number>(initialUrl.size ?? 0.05);
   const [band, setBand] = useState<SpherexBand>(initialUrl.band ?? DEFAULT_BAND);
   const [isEmbedMode] = useState<boolean>(initialUrl.embed ?? false);
+
+  // Aladin Sky Picker drawer toggle
+  const [isAladinOpen, setIsAladinOpen] = useState<boolean>(false);
+
+  // View Mode: Blink sequence vs Difference vs Stacked
+  const [viewMode, setViewMode] = useState<ViewMode>('blink');
 
   // Playback state
   const [currentFrameIndex, setCurrentFrameIndex] = useState<number>(0);
@@ -98,7 +108,7 @@ export const App: React.FC = () => {
 
   // Playback animation loop
   useEffect(() => {
-    if (!isPlaying || !sequenceData || sequenceData.frames.length <= 1) {
+    if (!isPlaying || viewMode !== 'blink' || !sequenceData || sequenceData.frames.length <= 1) {
       return;
     }
 
@@ -134,7 +144,7 @@ export const App: React.FC = () => {
 
     animId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animId);
-  }, [isPlaying, fps, loopMode, sequenceData]);
+  }, [isPlaying, viewMode, fps, loopMode, sequenceData]);
 
   // Step controls
   const handleStepForward = useCallback(() => {
@@ -174,10 +184,46 @@ export const App: React.FC = () => {
     navigator.clipboard.writeText(getShareableUrl());
   };
 
-  const currentFrame =
-    sequenceData && sequenceData.frames.length > 0
-      ? sequenceData.frames[currentFrameIndex]
-      : null;
+  // Determine active frame for canvas display based on viewMode
+  let activeDisplayFrame: SpherexFrame | null = null;
+  let analysisSlotNotice: string | null = null;
+
+  if (sequenceData && sequenceData.frames.length > 0) {
+    const baseFrame = sequenceData.frames[currentFrameIndex];
+
+    if (viewMode === 'blink') {
+      activeDisplayFrame = baseFrame;
+    } else if (viewMode === 'difference') {
+      const f0 = sequenceData.frames[0];
+      const diffFlux = computeDifference(f0, baseFrame);
+
+      if (diffFlux) {
+        activeDisplayFrame = {
+          ...baseFrame,
+          flux: diffFlux,
+        };
+      } else {
+        // Fallback display while Member 3 works on analysis
+        activeDisplayFrame = baseFrame;
+        analysisSlotNotice =
+          'Difference View Hook ready for Member 3 function (Checkpoint 5). Showing reference frame.';
+      }
+    } else if (viewMode === 'stacked') {
+      const stackedFlux = stackFrames(sequenceData.frames, 'mean');
+
+      if (stackedFlux) {
+        activeDisplayFrame = {
+          ...baseFrame,
+          flux: stackedFlux,
+        };
+      } else {
+        // Fallback display while Member 3 works on analysis
+        activeDisplayFrame = baseFrame;
+        analysisSlotNotice =
+          'Stacking View Hook ready for Member 3 function (Checkpoint 5). Showing reference frame.';
+      }
+    }
+  }
 
   return (
     <div className="min-h-screen flex flex-col bg-neutral-950 text-neutral-100 font-sans">
@@ -222,8 +268,76 @@ export const App: React.FC = () => {
             onTargetChange={handleTargetChange}
             onFovChange={setFov}
             onBandChange={setBand}
+            isAladinOpen={isAladinOpen}
+            onToggleAladin={() => setIsAladinOpen((prev) => !prev)}
             isLoading={isLoading}
           />
+        )}
+
+        {/* Aladin Lite All-Sky Picker Drawer */}
+        {!isEmbedMode && (
+          <AladinSkyPicker
+            ra={ra}
+            dec={dec}
+            fovDegrees={fov}
+            isOpen={isAladinOpen}
+            onClose={() => setIsAladinOpen(false)}
+            onSelectPosition={(newRa, newDec) => {
+              setRa(+newRa.toFixed(6));
+              setDec(+newDec.toFixed(6));
+            }}
+          />
+        )}
+
+        {/* View Mode Selector Tabs (Blink Player / Difference View / Stacked) */}
+        <div className="flex items-center justify-between bg-neutral-900 border border-neutral-800 rounded-lg p-2 text-xs">
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setViewMode('blink')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md font-medium transition ${
+                viewMode === 'blink'
+                  ? 'bg-cyan-500 text-neutral-950 shadow-sm'
+                  : 'text-neutral-400 hover:text-neutral-200'
+              }`}
+            >
+              <Film className="w-3.5 h-3.5" /> Blink Sequence
+            </button>
+            <button
+              onClick={() => setViewMode('difference')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md font-medium transition ${
+                viewMode === 'difference'
+                  ? 'bg-cyan-500 text-neutral-950 shadow-sm'
+                  : 'text-neutral-400 hover:text-neutral-200'
+              }`}
+            >
+              <SplitSquareVertical className="w-3.5 h-3.5" /> Difference View
+            </button>
+            <button
+              onClick={() => setViewMode('stacked')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md font-medium transition ${
+                viewMode === 'stacked'
+                  ? 'bg-cyan-500 text-neutral-950 shadow-sm'
+                  : 'text-neutral-400 hover:text-neutral-200'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5" /> Stacking View
+            </button>
+          </div>
+
+          <span className="text-[11px] text-neutral-500 hidden sm:inline font-mono">
+            {viewMode === 'blink'
+              ? 'Multi-epoch blink sequence'
+              : viewMode === 'difference'
+              ? 'Frame subtraction (Member 3 hook)'
+              : 'Co-added stack (Member 3 hook)'}
+          </span>
+        </div>
+
+        {/* Analysis Hook Notice Banner */}
+        {analysisSlotNotice && (
+          <div className="bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-xs px-3 py-2 rounded-lg font-mono">
+            ℹ {analysisSlotNotice}
+          </div>
         )}
 
         {/* Main Player Display */}
@@ -237,9 +351,9 @@ export const App: React.FC = () => {
                   Loading SPHEREx frame sequence...
                 </span>
               </div>
-            ) : currentFrame ? (
+            ) : activeDisplayFrame ? (
               <FrameCanvas
-                frame={currentFrame}
+                frame={activeDisplayFrame}
                 stretch={stretch}
                 isSampleData={sequenceData?.isSampleData}
               />
@@ -249,12 +363,12 @@ export const App: React.FC = () => {
               </div>
             )}
 
-            {/* Playback Controls */}
-            {sequenceData && (
+            {/* Playback Controls (Active in Blink & Difference modes) */}
+            {sequenceData && viewMode !== 'stacked' && (
               <PlayerControls
                 currentFrame={currentFrameIndex}
                 totalFrames={sequenceData.frameCount}
-                isPlaying={isPlaying}
+                isPlaying={isPlaying && viewMode === 'blink'}
                 fps={fps}
                 loopMode={loopMode}
                 onPlayToggle={() => setIsPlaying((p) => !p)}
@@ -278,15 +392,15 @@ export const App: React.FC = () => {
             {/* Visual Controls: Stretch & Invert */}
             <StretchControls
               stretch={stretch}
-              minPossible={currentFrame?.minFlux ?? 0}
-              maxPossible={currentFrame?.maxFlux ?? 100}
+              minPossible={activeDisplayFrame?.minFlux ?? 0}
+              maxPossible={activeDisplayFrame?.maxFlux ?? 100}
               onChange={(updated) => setStretch((prev) => ({ ...prev, ...updated }))}
               onAutoMinMax={handleAutoMinMax}
             />
 
             {/* Metadata Panel */}
-            {sequenceData && currentFrame && (
-              <MetadataPanel data={sequenceData} currentFrame={currentFrame} />
+            {sequenceData && activeDisplayFrame && (
+              <MetadataPanel data={sequenceData} currentFrame={activeDisplayFrame} />
             )}
           </div>
         </div>
