@@ -1,4 +1,4 @@
-# SPHEREx Sky Viewer — Member 3: Spectrum, Checks and Release
+# SPHEREx Sky Viewer : Spectrum, Checks and Release
 
 [![NASA Space Apps 2026](https://img.shields.io/badge/NASA%20Space%20Apps-2026-blue.svg)](https://www.spaceappschallenge.org/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
