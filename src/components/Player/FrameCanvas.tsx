@@ -140,6 +140,12 @@ export const FrameCanvas: React.FC<FrameCanvasProps> = ({
           <span className="text-neutral-500">Dimensions:</span>
           <span className="text-neutral-200">{frame.width} × {frame.height} px</span>
         </div>
+        {frame.obsId && (
+          <div className="flex justify-between gap-4 border-t border-neutral-800/60 pt-1">
+            <span className="text-neutral-500">Obs ID:</span>
+            <span className="text-cyan-400 font-semibold">{frame.obsId}</span>
+          </div>
+        )}
       </div>
 
       {/* Pixel Inspector HUD (Bottom Left) */}

@@ -3,15 +3,13 @@ import { Share2, Settings, Check, Database } from 'lucide-react';
 import { API_CONFIG } from '../../services/apiClient';
 
 interface NavbarProps {
-  useSampleFile: boolean;
-  onToggleDataSource: (useSample: boolean) => void;
   onShare: () => void;
+  onApiUrlChange?: (newUrl: string) => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
-  useSampleFile,
-  onToggleDataSource,
   onShare,
+  onApiUrlChange,
 }) => {
   const [copied, setCopied] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -26,6 +24,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   const handleSaveApiUrl = () => {
     API_CONFIG.baseUrl = apiUrl;
     setShowSettings(false);
+    onApiUrlChange?.(apiUrl);
   };
 
   return (
@@ -53,31 +52,10 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Action Controls */}
         <div className="flex items-center gap-3">
-          {/* Data Source Selector */}
-          <div className="flex items-center gap-2 bg-neutral-900 border border-neutral-800 rounded-md p-1 text-xs">
-            <span className="text-neutral-500 pl-1 text-[11px] flex items-center gap-1">
-              <Database className="w-3 h-3" /> Data:
-            </span>
-            <button
-              onClick={() => onToggleDataSource(true)}
-              className={`px-2 py-0.5 rounded font-mono transition ${
-                useSampleFile
-                  ? 'bg-amber-500/20 text-amber-300 font-semibold border border-amber-500/40'
-                  : 'text-neutral-400 hover:text-neutral-200'
-              }`}
-            >
-              Sample File
-            </button>
-            <button
-              onClick={() => onToggleDataSource(false)}
-              className={`px-2 py-0.5 rounded font-mono transition ${
-                !useSampleFile
-                  ? 'bg-cyan-500/20 text-cyan-300 font-semibold border border-cyan-500/40'
-                  : 'text-neutral-400 hover:text-neutral-200'
-              }`}
-            >
-              Member 1 API
-            </button>
+          {/* Data Source Indicator */}
+          <div className="flex items-center gap-1.5 bg-neutral-900 border border-neutral-800 rounded-md px-2.5 py-1 text-xs font-mono text-cyan-300">
+            <Database className="w-3.5 h-3.5 text-cyan-400" />
+            <span>SPHEREx Level 2 API</span>
           </div>
 
           {/* Share Button */}

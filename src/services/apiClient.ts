@@ -2,16 +2,18 @@
 // Switches from the sample file to Member 1's real API (/api/frames) with a single address setting.
 
 import type { SpherexApiResponse, SpherexBand } from '../types/spherex';
-import { getSampleMovingDotData } from './sampleData';
 
 // Configurable API Address. In production or local dev, point this to Member 1's FastAPI server.
+const DEFAULT_BASE_URL =
+  typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL
+    ? import.meta.env.VITE_API_BASE_URL
+    : 'http://localhost:8000';
+
 export const API_CONFIG = {
-  // Member 1 FastAPI server base URL
-  baseUrl: 'http://localhost:8000',
+  // Member 1 FastAPI server base URL (configured via VITE_API_BASE_URL or settings)
+  baseUrl: DEFAULT_BASE_URL,
   // Path as agreed in Section 7 API contract: /api/frames
   endpoint: '/api/frames',
-  // When true, uses the local sample file (fake moving dot) instead of calling Member 1's API
-  useSampleFile: true,
 };
 
 export async function fetchSpherexSequence(params: {
@@ -20,35 +22,126 @@ export async function fetchSpherexSequence(params: {
   size?: number; // field of view in degrees
   band?: SpherexBand;
   release?: string;
+  maxFrames?: number;
+  timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<SpherexApiResponse> {
-  const { ra, dec, size = 0.05, band = 'SPHEREx-D1', release = 'DR1' } = params;
+  const {
+    ra,
+    dec,
+    size = 0.05,
+    band = 'SPHEREx-D6',
+    release = 'DR1',
+    maxFrames,
+    timeoutMs = 30000,
+    signal,
+  } = params;
 
-  if (API_CONFIG.useSampleFile) {
-    // Return the sample fake moving dot dataset directly
-    return getSampleMovingDotData(ra, dec, band);
-  }
+  // Real Level 2 SPHEREx observations are strictly served by Member 1's FastAPI backend.
+  // Synthetic / fake astronomy datasets are disabled.
 
   // Switch to Member 1's real API:
-  // Request: RA, Dec, size in degrees, band and data release
-  const url = `${API_CONFIG.baseUrl}${API_CONFIG.endpoint}?ra=${ra}&dec=${dec}&size=${size}&band=${band}&release=${release}`;
-
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`Member 1 API failed (${res.status}): ${res.statusText}`);
+  // Request: RA, Dec, size in degrees, band, release, and optional max_frames
+  const queryParams = new URLSearchParams({
+    ra: ra.toString(),
+    dec: dec.toString(),
+    size: size.toString(),
+    band,
+    release,
+  });
+  if (maxFrames !== undefined && maxFrames > 0) {
+    queryParams.set('max_frames', maxFrames.toString());
   }
 
-  const data = await res.json();
+  const url = `${API_CONFIG.baseUrl}${API_CONFIG.endpoint}?${queryParams.toString()}`;
 
-  // Convert raw array buffers if necessary
-  const processedFrames = data.frames.map((frame: any) => ({
-    ...frame,
-    flux: frame.flux instanceof Float32Array ? frame.flux : new Float32Array(frame.flux),
-    flags: frame.flags ? (frame.flags instanceof Uint8Array ? frame.flags : new Uint8Array(frame.flags)) : undefined,
-  }));
+  // Manage bounded timeout alongside optional caller-provided abort signal
+  const timeoutController = new AbortController();
+  const timer = setTimeout(() => {
+    timeoutController.abort(new Error(`SPHEREx API request timed out after ${Math.round(timeoutMs / 1000)}s.`));
+  }, timeoutMs);
 
-  return {
-    ...data,
-    frames: processedFrames,
-    isSampleData: false,
-  };
+  let combinedSignal: AbortSignal;
+  if (signal) {
+    if (signal.aborted) {
+      clearTimeout(timer);
+      const abortErr = new Error('Aborted');
+      abortErr.name = 'AbortError';
+      throw abortErr;
+    }
+    const combined = new AbortController();
+    signal.addEventListener('abort', () => combined.abort(signal.reason), { once: true });
+    timeoutController.signal.addEventListener('abort', () => combined.abort(timeoutController.signal.reason), { once: true });
+    combinedSignal = combined.signal;
+  } else {
+    combinedSignal = timeoutController.signal;
+  }
+
+  try {
+    const res = await fetch(url, { signal: combinedSignal });
+    clearTimeout(timer);
+
+    if (!res.ok) {
+      let errorDetail = res.statusText || 'Unknown Error';
+      try {
+        const errJson = await res.json();
+        if (errJson && errJson.detail) {
+          errorDetail = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+        }
+      } catch {
+        // Keep default statusText if response is not JSON
+      }
+      throw new Error(`SPHEREx API error (${res.status}): ${errorDetail}`);
+    }
+
+    const data = await res.json();
+
+    if (!data || typeof data !== 'object') {
+      throw new Error('Malformed API response: expected JSON object from SPHEREx backend.');
+    }
+
+    if (!Array.isArray(data.frames)) {
+      throw new Error('Malformed API response: missing "frames" array from SPHEREx backend.');
+    }
+
+    if (!data.wcs || typeof data.wcs !== 'object') {
+      throw new Error('Malformed API response: missing "wcs" metadata from SPHEREx backend.');
+    }
+
+    // Convert raw array buffers to typed arrays matching frontend contract
+    const processedFrames = data.frames.map((frame: any, idx: number) => {
+      if (!frame || typeof frame !== 'object') {
+        throw new Error(`Malformed frame at index ${idx}: expected frame object.`);
+      }
+      return {
+        ...frame,
+        flux: frame.flux instanceof Float32Array ? frame.flux : new Float32Array(frame.flux || []),
+        flags: frame.flags ? (frame.flags instanceof Uint8Array ? frame.flags : new Uint8Array(frame.flags)) : undefined,
+      };
+    });
+
+    return {
+      ...data,
+      frames: processedFrames,
+      isSampleData: false,
+    };
+  } catch (err: any) {
+    clearTimeout(timer);
+    if (signal?.aborted) {
+      const abortErr = new Error('Aborted');
+      abortErr.name = 'AbortError';
+      throw abortErr;
+    }
+    if (timeoutController.signal.aborted) {
+      throw new Error(
+        `SPHEREx API request timed out after ${Math.round(timeoutMs / 1000)}s. The server may be busy or downloading archive data.`
+      );
+    }
+    if (err instanceof TypeError && err.message.toLowerCase().includes('fetch')) {
+      throw new Error(
+        `Cannot connect to SPHEREx backend at ${API_CONFIG.baseUrl}. Ensure the FastAPI server is running on ${API_CONFIG.baseUrl}.`
+      );
+    }
+    throw err;
+  }
 }

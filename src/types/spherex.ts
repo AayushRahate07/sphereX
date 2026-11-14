@@ -9,9 +9,9 @@ export type SpherexBand =
   | 'SPHEREx-D5'
   | 'SPHEREx-D6';
 
-// Configurable default band. Notice: Which detector shows WISE 0855 or other targets
-// is an open check in Section 3, pending Member 1's verification.
-export const DEFAULT_BAND: SpherexBand = 'SPHEREx-D1';
+// Configurable default band. Verified by Member 1: SPHEREx-D6 shows WISE 0855
+// with verified multi-epoch baseline (May, Nov, Dec 2025).
+export const DEFAULT_BAND: SpherexBand = 'SPHEREx-D6';
 
 export interface BandInfo {
   id: SpherexBand;
@@ -48,6 +48,7 @@ export interface SpherexFrame {
   flags?: Uint8Array; // Bad pixel flags (0 = good)
   minFlux: number;
   maxFlux: number;
+  obsId?: string; // Source SPHEREx observation ID for provenance
 }
 
 export interface CatalogMarker {

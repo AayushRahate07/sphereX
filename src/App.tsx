@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import type { SpherexApiResponse, SpherexBand, SpherexFrame } from './types/spherex';
 import { DEFAULT_BAND, TEST_TARGETS } from './types/spherex';
-import { fetchSpherexSequence, API_CONFIG } from './services/apiClient';
+import { fetchSpherexSequence } from './services/apiClient';
 import { parseUrlState, syncUrlState, getShareableUrl } from './utils/urlState';
 import type { StretchParams } from './utils/stretch';
 import { FrameCanvas } from './components/Player/FrameCanvas';
@@ -25,6 +25,7 @@ export const App: React.FC = () => {
   const [dec, setDec] = useState<number>(initialUrl.dec ?? TEST_TARGETS[0].dec);
   const [fov, setFov] = useState<number>(initialUrl.size ?? 0.05);
   const [band, setBand] = useState<SpherexBand>(initialUrl.band ?? DEFAULT_BAND);
+  const [maxFrames] = useState<number | undefined>(initialUrl.maxFrames);
   const [isEmbedMode] = useState<boolean>(initialUrl.embed ?? false);
 
   // Aladin Sky Picker drawer toggle
@@ -44,7 +45,11 @@ export const App: React.FC = () => {
   const [sequenceData, setSequenceData] = useState<SpherexApiResponse | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [useSampleFile, setUseSampleFile] = useState<boolean>(API_CONFIG.useSampleFile);
+
+  // Request cancellation, race condition prevention, and caching refs
+  const activeReqIdRef = useRef<number>(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const cacheRef = useRef<Map<string, SpherexApiResponse>>(new Map());
 
   // Stretch & contrast state
   const [stretch, setStretch] = useState<StretchParams>({
@@ -56,17 +61,45 @@ export const App: React.FC = () => {
 
   // Fetch sequence data when target / band / data source changes
   const loadSequence = useCallback(async () => {
+    // Abort any prior in-flight request to prevent race conditions
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    activeReqIdRef.current += 1;
+    const currentReqId = activeReqIdRef.current;
+
     setIsLoading(true);
     setErrorMsg(null);
+
+    // Check in-memory cache to prevent redundant fetches
+    const cacheKey = `${ra.toFixed(6)}_${dec.toFixed(6)}_${fov}_${band}_${maxFrames ?? 'default'}`;
+    if (cacheRef.current.has(cacheKey)) {
+      const cached = cacheRef.current.get(cacheKey)!;
+      setSequenceData(cached);
+      setCurrentFrameIndex(0);
+      setIsLoading(false);
+      return;
+    }
+
     try {
-      API_CONFIG.useSampleFile = useSampleFile;
       const data = await fetchSpherexSequence({
         ra,
         dec,
         size: fov,
         band,
+        maxFrames,
+        signal: controller.signal,
       });
 
+      // Ignore stale response if a newer request was already dispatched
+      if (currentReqId !== activeReqIdRef.current) {
+        return;
+      }
+
+      cacheRef.current.set(cacheKey, data);
       setSequenceData(data);
       setCurrentFrameIndex(0);
 
@@ -80,11 +113,20 @@ export const App: React.FC = () => {
         }));
       }
     } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to fetch SPHEREx frames.');
+      // Aborted requests are superseded intentionally; do not show error
+      if (err.name === 'AbortError') {
+        return;
+      }
+      if (currentReqId === activeReqIdRef.current) {
+        setSequenceData(null);
+        setErrorMsg(err.message || 'Failed to fetch SPHEREx frames.');
+      }
     } finally {
-      setIsLoading(false);
+      if (currentReqId === activeReqIdRef.current) {
+        setIsLoading(false);
+      }
     }
-  }, [ra, dec, fov, band, useSampleFile]);
+  }, [ra, dec, fov, band, maxFrames, initialUrl.min, initialUrl.max]);
 
   useEffect(() => {
     loadSequence();
@@ -103,8 +145,9 @@ export const App: React.FC = () => {
       min: stretch.min,
       max: stretch.max,
       embed: isEmbedMode,
+      maxFrames,
     });
-  }, [ra, dec, fov, band, fps, stretch, isEmbedMode]);
+  }, [ra, dec, fov, band, fps, stretch, isEmbedMode, maxFrames]);
 
   // Playback animation loop
   useEffect(() => {
@@ -229,32 +272,20 @@ export const App: React.FC = () => {
     <div className="min-h-screen flex flex-col bg-neutral-950 text-neutral-100 font-sans">
       {!isEmbedMode && (
         <Navbar
-          useSampleFile={useSampleFile}
-          onToggleDataSource={(useSample) => {
-            setUseSampleFile(useSample);
-            API_CONFIG.useSampleFile = useSample;
-          }}
           onShare={handleShare}
+          onApiUrlChange={() => {
+            cacheRef.current.clear();
+            loadSequence();
+          }}
         />
       )}
 
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 space-y-4">
         {/* Error notification if Member 1 API fails */}
         {errorMsg && (
-          <div className="bg-red-500/10 border border-red-500/40 text-red-300 p-3 rounded-lg text-xs flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
-              <span>{errorMsg}</span>
-            </div>
-            <button
-              onClick={() => {
-                setUseSampleFile(true);
-                API_CONFIG.useSampleFile = true;
-              }}
-              className="px-2 py-1 rounded bg-red-500/20 hover:bg-red-500/30 text-red-200 transition font-mono"
-            >
-              Switch to Sample File
-            </button>
+          <div className="bg-red-500/10 border border-red-500/40 text-red-300 p-3 rounded-lg text-xs flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+            <span>{errorMsg}</span>
           </div>
         )}
 

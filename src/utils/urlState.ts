@@ -14,6 +14,7 @@ export interface ViewStateParams {
   min?: number;
   max?: number;
   embed?: boolean;
+  maxFrames?: number;
 }
 
 export function parseUrlState(): Partial<ViewStateParams> {
@@ -32,6 +33,13 @@ export function parseUrlState(): Partial<ViewStateParams> {
   if (params.has('min')) parsed.min = parseFloat(params.get('min')!);
   if (params.has('max')) parsed.max = parseFloat(params.get('max')!);
   if (params.has('embed')) parsed.embed = params.get('embed') === 'true' || params.get('embed') === '1';
+  if (params.has('max_frames')) {
+    const val = parseInt(params.get('max_frames')!, 10);
+    if (!isNaN(val) && val > 0) parsed.maxFrames = val;
+  } else if (params.has('frames')) {
+    const val = parseInt(params.get('frames')!, 10);
+    if (!isNaN(val) && val > 0) parsed.maxFrames = val;
+  }
 
   return parsed;
 }
@@ -51,6 +59,7 @@ export function syncUrlState(state: ViewStateParams): void {
   if (state.min !== undefined) params.set('min', state.min.toFixed(1));
   if (state.max !== undefined) params.set('max', state.max.toFixed(1));
   if (state.embed) params.set('embed', '1');
+  if (state.maxFrames !== undefined) params.set('max_frames', state.maxFrames.toString());
 
   const newUrl = `${window.location.pathname}?${params.toString()}`;
   window.history.replaceState(null, '', newUrl);

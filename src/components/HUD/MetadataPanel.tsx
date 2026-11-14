@@ -18,9 +18,19 @@ export const MetadataPanel: React.FC<MetadataPanelProps> = ({
           <Info className="w-4 h-4 text-cyan-400" />
           <span>Observation & Frame Metadata</span>
         </div>
-        <span className="font-mono text-[11px] text-neutral-500">
-          Release: {data.dataRelease}
-        </span>
+        <div className="flex items-center gap-2">
+          {currentFrame.obsId && (
+            <span
+              className="font-mono text-[11px] text-cyan-300 bg-cyan-950/60 px-1.5 py-0.5 rounded border border-cyan-800/40"
+              title="SPHEREx Observation ID"
+            >
+              Obs: {currentFrame.obsId}
+            </span>
+          )}
+          <span className="font-mono text-[11px] text-neutral-500">
+            Release: {data.dataRelease}
+          </span>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 font-mono">
