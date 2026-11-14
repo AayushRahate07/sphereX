@@ -8,12 +8,16 @@ interface FrameCanvasProps {
   frame: SpherexFrame;
   stretch: StretchParams;
   isSampleData?: boolean;
+  aperture?: { x: number; y: number } | null;
+  onSelectAperture?: (x: number, y: number) => void;
 }
 
 export const FrameCanvas: React.FC<FrameCanvasProps> = ({
   frame,
   stretch,
   isSampleData = false,
+  aperture,
+  onSelectAperture,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -23,6 +27,7 @@ export const FrameCanvas: React.FC<FrameCanvasProps> = ({
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [dragStart, setDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [dragDistance, setDragDistance] = useState<number>(0);
 
   // Cursor inspection
   const [hoverPixel, setHoverPixel] = useState<{ x: number; y: number; flux: number } | null>(null);
@@ -60,12 +65,16 @@ export const FrameCanvas: React.FC<FrameCanvasProps> = ({
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return; // Left click only
     setIsDragging(true);
+    setDragDistance(0);
     setDragStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
   }, [pan]);
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
       if (isDragging) {
+        const dx = e.clientX - dragStart.x - pan.x;
+        const dy = e.clientY - dragStart.y - pan.y;
+        setDragDistance((prev) => prev + Math.abs(dx) + Math.abs(dy));
         setPan({
           x: e.clientX - dragStart.x,
           y: e.clientY - dragStart.y,
@@ -89,12 +98,29 @@ export const FrameCanvas: React.FC<FrameCanvasProps> = ({
         setHoverPixel(null);
       }
     },
-    [isDragging, dragStart, frame]
+    [isDragging, dragStart, pan, frame]
   );
 
-  const handleMouseUp = useCallback(() => {
-    setIsDragging(false);
-  }, []);
+  const handleMouseUp = useCallback(
+    (e: React.MouseEvent) => {
+      setIsDragging(false);
+
+      // If user clicked without dragging (drag distance < 5px), treat as aperture target selection
+      if (dragDistance < 5 && onSelectAperture && canvasRef.current) {
+        const rect = canvasRef.current.getBoundingClientRect();
+        const clientX = e.clientX - rect.left;
+        const clientY = e.clientY - rect.top;
+
+        const px = Math.floor((clientX / rect.width) * frame.width);
+        const py = Math.floor((clientY / rect.height) * frame.height);
+
+        if (px >= 0 && px < frame.width && py >= 0 && py < frame.height) {
+          onSelectAperture(px, py);
+        }
+      }
+    },
+    [dragDistance, onSelectAperture, frame]
+  );
 
   const handleResetView = useCallback(() => {
     setZoom(6.0);
@@ -149,9 +175,10 @@ export const FrameCanvas: React.FC<FrameCanvasProps> = ({
             <span>X: <strong className="text-neutral-100">{hoverPixel.x}</strong></span>
             <span>Y: <strong className="text-neutral-100">{hoverPixel.y}</strong></span>
             <span>Flux: <strong className="text-cyan-400">{hoverPixel.flux.toFixed(2)}</strong></span>
+            <span className="text-[10px] text-neutral-500 hidden sm:inline">(Click to plot light curve)</span>
           </>
         ) : (
-          <span className="text-neutral-500">Hover canvas to inspect flux</span>
+          <span className="text-neutral-500">Click any pixel to inspect light curve &amp; spectrum</span>
         )}
       </div>
 
@@ -190,7 +217,7 @@ export const FrameCanvas: React.FC<FrameCanvasProps> = ({
         <span className="text-xs text-neutral-500 px-1 font-mono">{zoom.toFixed(1)}×</span>
       </div>
 
-      {/* Main Pixel Canvas */}
+      {/* Main Pixel Canvas Container */}
       <div
         style={{
           transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
@@ -216,6 +243,27 @@ export const FrameCanvas: React.FC<FrameCanvasProps> = ({
             <div className="w-3 h-3 border border-red-500/80 rounded-full" />
             <div className="absolute w-5 h-[1px] bg-red-500/60" />
             <div className="absolute h-5 w-[1px] bg-red-500/60" />
+          </div>
+        )}
+
+        {/* User Clicked Photometry Aperture Ring */}
+        {aperture && (
+          <div
+            className="absolute pointer-events-none"
+            style={{
+              left: `${((aperture.x + 0.5) / frame.width) * 100}%`,
+              top: `${((aperture.y + 0.5) / frame.height) * 100}%`,
+              transform: 'translate(-50%, -50%)',
+            }}
+          >
+            {/* 2.5 pixel radius circle on image grid */}
+            <div
+              className="border-2 border-cyan-400 border-dashed rounded-full animate-pulse"
+              style={{
+                width: `${(5.0 / frame.width) * 100 * (frame.width / 36)}px`,
+                height: `${(5.0 / frame.height) * 100 * (frame.height / 36)}px`,
+              }}
+            />
           </div>
         )}
       </div>
