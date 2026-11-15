@@ -229,12 +229,12 @@ def plot_target_stacking(
     norm_min = min(vmin_raw, vmin_stk)
     norm_max = max(vmax_raw, vmax_stk)
 
-    im0 = axes[0].imshow(raw_frame.data, origin="lower", cmap="inferno", vmin=norm_min, vmax=norm_max)
+    im0 = axes[0].imshow(raw_frame.data, origin="lower", cmap="inferno", vmin=norm_min, vmax=norm_max, interpolation="bicubic")
     axes[0].set_title(f"Single Exposure\nSNR = {snr_before:.1f}", color="#f5a623", fontsize=11)
     axes[0].set_facecolor("#0e1117")
     axes[0].tick_params(colors="white")
 
-    im1 = axes[1].imshow(stacked_frame.data, origin="lower", cmap="inferno", vmin=norm_min, vmax=norm_max)
+    im1 = axes[1].imshow(stacked_frame.data, origin="lower", cmap="inferno", vmin=norm_min, vmax=norm_max, interpolation="bicubic")
     boost = snr_after / max(snr_before, 0.01)
     axes[1].set_title(
         f"Coadded Stack ({n_frames} Frames, {method})\nSNR = {snr_after:.1f} ({boost:.1f}x Boost)",
