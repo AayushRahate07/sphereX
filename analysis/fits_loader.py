@@ -723,7 +723,7 @@ def plot_fits_inspection(
     cy = frame.additional_metadata.get("center_pixel_y", (frame.shape[0] - 1.0) / 2.0)
 
     # 1. SCI Panel
-    im0 = axes[0].imshow(frame.data, origin="lower", cmap="inferno")
+    im0 = axes[0].imshow(frame.data, origin="lower", cmap="inferno", interpolation="bicubic")
     axes[0].set_title("SCI: Surface Brightness (MJy/sr)", color="#50e3c2", fontsize=11)
     axes[0].set_facecolor("#0e1117")
     axes[0].tick_params(colors="white")
@@ -745,7 +745,7 @@ def plot_fits_inspection(
     plt.setp(plt.getp(cb0.ax.axes, "xticklabels"), color="white")
 
     # 2. UNCERT Panel
-    im1 = axes[1].imshow(frame.uncertainty, origin="lower", cmap="magma")
+    im1 = axes[1].imshow(frame.uncertainty, origin="lower", cmap="magma", interpolation="bicubic")
     axes[1].set_title("UNCERT: 1-sigma Noise (MJy/sr)", color="#f5a623", fontsize=11)
     axes[1].set_facecolor("#0e1117")
     axes[1].tick_params(colors="white")
@@ -753,8 +753,8 @@ def plot_fits_inspection(
     cb1.ax.xaxis.set_tick_params(color="white")
     plt.setp(plt.getp(cb1.ax.axes, "xticklabels"), color="white")
 
-    # 3. MASK Panel
-    im2 = axes[2].imshow(frame.mask, origin="lower", cmap="Blues", vmin=0, vmax=max(4, int(np.max(frame.mask))))
+    # 3. MASK Panel (nearest neighbor to preserve discrete bitmask flags)
+    im2 = axes[2].imshow(frame.mask, origin="lower", cmap="Blues", vmin=0, vmax=max(4, int(np.max(frame.mask))), interpolation="nearest")
     axes[2].set_title("MASK: Data Quality Bitmask", color="#b8e986", fontsize=11)
     axes[2].set_facecolor("#0e1117")
     axes[2].tick_params(colors="white")

@@ -169,14 +169,14 @@ def test_visual_stacking_demonstration():
     fig, axes = plt.subplots(1, 3, figsize=(14, 4.5), dpi=150)
 
     # Panel 1: Single Noisy Frame
-    im1 = axes[0].imshow(frames[0].data, origin="lower", cmap="inferno", vmin=0.8, vmax=1.5)
+    im1 = axes[0].imshow(frames[0].data, origin="lower", cmap="inferno", vmin=0.8, vmax=1.5, interpolation="bicubic")
     axes[0].set_title(f"Single Exposure\n(SNR ~ {measure_aperture_photometry(frames[0]).snr:.1f})", fontsize=11, fontweight="bold")
     axes[0].set_xlabel("X [pixels]")
     axes[0].set_ylabel("Y [pixels]")
     plt.colorbar(im1, ax=axes[0], fraction=0.046, pad=0.04, label="MJy/sr")
 
     # Panel 2: Cosmic Ray Hit Frame
-    im2 = axes[1].imshow(cr_frame.data, origin="lower", cmap="inferno", vmin=0.8, vmax=2.5)
+    im2 = axes[1].imshow(cr_frame.data, origin="lower", cmap="inferno", vmin=0.8, vmax=2.5, interpolation="bicubic")
     axes[1].set_title("Single Exposure with\nCosmic Ray Spike", fontsize=11, fontweight="bold", color="darkred")
     axes[1].set_xlabel("X [pixels]")
     axes[1].annotate("Cosmic Ray Hit", xy=(14, 12), xytext=(16, 18),
@@ -186,7 +186,7 @@ def test_visual_stacking_demonstration():
 
     # Panel 3: Clean Stacked Frame (16 coadded exposures)
     meas_st = measure_aperture_photometry(stacked)
-    im3 = axes[2].imshow(stacked.data, origin="lower", cmap="inferno", vmin=0.8, vmax=1.5)
+    im3 = axes[2].imshow(stacked.data, origin="lower", cmap="inferno", vmin=0.8, vmax=1.5, interpolation="bicubic")
     axes[2].set_title(f"Stacked Coadd (N=16)\n(SNR ~ {meas_st.snr:.1f}) - Outlier Free", fontsize=11, fontweight="bold", color="darkgreen")
     axes[2].set_xlabel("X [pixels]")
     plt.colorbar(im3, ax=axes[2], fraction=0.046, pad=0.04, label="MJy/sr")
