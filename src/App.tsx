@@ -12,7 +12,9 @@ import { parseUrlState, syncUrlState, getShareableUrl } from './utils/urlState';
 import { type StretchParams, computeRobustDisplayRange, computeFrameDisplayRange } from './utils/stretch';
 import { FrameCanvas } from './components/Player/FrameCanvas';
 import { PlayerControls } from './components/Player/PlayerControls';
-import { AladinSkyPicker } from './components/Navigation/AladinSkyPicker';
+const AladinSkyPicker = React.lazy(() =>
+  import('./components/Navigation/AladinSkyPicker').then((m) => ({ default: m.AladinSkyPicker }))
+);
 import { HelpModal } from './components/HUD/HelpModal';
 import { ScienceDossierModal } from './components/HUD/ScienceDossierModal';
 import { Navbar } from './components/Header/Navbar';
@@ -28,6 +30,7 @@ import {
   Palette,
   RefreshCw,
   StopCircle,
+  Globe,
 } from 'lucide-react';
 
 export type { ViewMode };
@@ -832,31 +835,41 @@ export const App: React.FC = () => {
       {isAladinOpen && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-neutral-900 border border-neutral-800 rounded-2xl w-full max-w-4xl h-[80vh] flex flex-col overflow-hidden shadow-2xl">
-            <div className="px-4 py-3 flex items-center justify-between border-b border-neutral-800 bg-neutral-950">
+            <div className="px-4 py-3 flex items-center justify-between border-b border-neutral-800 bg-neutral-950 shrink-0">
               <span className="font-semibold text-sm text-neutral-100 flex items-center gap-2">
+                <Globe className="w-4 h-4 text-cyan-400" />
                 All-Sky Celestial Map (CDS Aladin Lite)
               </span>
               <button
                 onClick={() => setIsAladinOpen(false)}
-                className="text-neutral-400 hover:text-neutral-100 text-xs px-2.5 py-1 rounded bg-neutral-800"
+                className="text-neutral-400 hover:text-neutral-100 text-xs px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 transition cursor-pointer"
               >
                 Close Map
               </button>
             </div>
-            <div className="flex-1 min-h-0 relative">
-              <AladinSkyPicker
-                ra={ra}
-                dec={dec}
-                fovDegrees={fov}
-                isOpen={isAladinOpen}
-                onClose={() => setIsAladinOpen(false)}
-                onSelectPosition={(newRa, newDec) => {
-                  setRa(+newRa.toFixed(6));
-                  setDec(+newDec.toFixed(6));
-                  setSelectedAperture(null);
-                  setIsAladinOpen(false);
-                }}
-              />
+            <div className="flex-1 min-h-0">
+              <React.Suspense
+                fallback={
+                  <div className="h-full flex items-center justify-center gap-2 text-xs text-neutral-400 font-mono bg-neutral-950">
+                    <Loader2 className="w-4 h-4 animate-spin text-cyan-400" />
+                    Loading All-Sky Celestial Engine...
+                  </div>
+                }
+              >
+                <AladinSkyPicker
+                  ra={ra}
+                  dec={dec}
+                  fovDegrees={fov}
+                  isOpen={isAladinOpen}
+                  onClose={() => setIsAladinOpen(false)}
+                  onSelectPosition={(newRa, newDec) => {
+                    setRa(+newRa.toFixed(6));
+                    setDec(+newDec.toFixed(6));
+                    setSelectedAperture(null);
+                    setIsAladinOpen(false);
+                  }}
+                />
+              </React.Suspense>
             </div>
           </div>
         </div>
