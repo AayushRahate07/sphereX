@@ -22,6 +22,23 @@ from backend.app.config import (
     FITS_CACHE_DIR,
     SCRATCH_DIR,
 )
+
+# Shared HTTP connection pool for fast keep-alive reuse across IRSA requests
+_RETRIEVAL_SESSION: Optional[requests.Session] = None
+
+def get_retrieval_session() -> requests.Session:
+    global _RETRIEVAL_SESSION
+    if _RETRIEVAL_SESSION is None:
+        s = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=24,
+            pool_maxsize=24,
+            max_retries=requests.adapters.Retry(total=2, backoff_factor=0.3, status_forcelist=[502, 503, 504]),
+        )
+        s.mount("https://", adapter)
+        s.mount("http://", adapter)
+        _RETRIEVAL_SESSION = s
+    return _RETRIEVAL_SESSION
 from backend.app.services.selector import SelectedObservation
 
 logger = logging.getLogger(__name__)
@@ -435,7 +452,7 @@ def batch_retrieve_cutouts(
     dec: float,
     size_deg: float = DEFAULT_FOV_DEG,
     release: str = DEFAULT_RELEASE,
-    max_workers: int = 4,
+    max_workers: int = 6,
     coords_per_obs: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> Dict[str, Path]:
     """Retrieve a list of cutouts concurrently using a bounded thread pool.

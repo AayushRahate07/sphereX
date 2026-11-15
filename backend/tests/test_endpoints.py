@@ -13,6 +13,14 @@ from backend.app.services.selector import SelectedObservation
 
 client = TestClient(app)
 
+from backend.app.routers.frames import clear_frames_cache
+
+@pytest.fixture(autouse=True)
+def reset_response_cache():
+    clear_frames_cache()
+    yield
+    clear_frames_cache()
+
 
 def test_get_health_endpoint():
     """GET /api/health must return HTTP 200 with service metadata and cache stats."""

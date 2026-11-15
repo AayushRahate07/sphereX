@@ -142,14 +142,39 @@ export const FrameCanvas: React.FC<FrameCanvasProps> = ({
     ctx.putImageData(imgData, 0, 0);
   }, [frame, stretch, rgbData, redStretch, greenStretch, blueStretch, width, height]);
 
-  // Handle Wheel Zoom
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault();
-    setZoom((prev) => {
-      const delta = e.deltaY < 0 ? 1.2 : 0.8;
-      const next = prev * delta;
-      return Math.min(25.0, Math.max(0.2, Math.round(next * 100) / 100));
-    });
+  // Native non-passive wheel event listener: zoom in/out only when scrolling over canvas, nothing else
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleNativeWheel = (e: WheelEvent) => {
+      // Prevent browser page zoom, pinch zoom, and document scroll
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Smooth, responsive zoom calculation based on scroll delta
+      const zoomSensitivity = 0.0015;
+      const clampedDelta = Math.max(-100, Math.min(100, e.deltaY));
+      const factor = Math.exp(-clampedDelta * zoomSensitivity);
+
+      setZoom((prev) => {
+        const next = prev * factor;
+        return Math.min(30.0, Math.max(0.5, next));
+      });
+    };
+
+    container.addEventListener('wheel', handleNativeWheel, { passive: false });
+    return () => {
+      container.removeEventListener('wheel', handleNativeWheel);
+    };
+  }, []);
+
+  const handleZoomIn = useCallback(() => {
+    setZoom((z) => Math.min(30.0, Number((z * 1.25).toFixed(2))));
+  }, []);
+
+  const handleZoomOut = useCallback(() => {
+    setZoom((z) => Math.max(0.5, Number((z * 0.8).toFixed(2))));
   }, []);
 
   // Handle Drag Panning
@@ -231,16 +256,16 @@ export const FrameCanvas: React.FC<FrameCanvasProps> = ({
   return (
     <div
       ref={containerRef}
-      className="relative w-full h-[500px] sm:h-[540px] lg:h-[580px] bg-neutral-900 border border-neutral-800 rounded-lg overflow-hidden flex items-center justify-center select-none"
-      onWheel={handleWheel}
+      className="relative w-full flex-1 h-full min-h-[340px] bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden flex items-center justify-center select-none shadow-lg"
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
+      onDoubleClick={(e) => e.preventDefault()}
       onMouseLeave={() => {
         setIsDragging(false);
         setHoverPixel(null);
       }}
-      style={{ cursor: isDragging ? 'grabbing' : 'crosshair' }}
+      style={{ cursor: isDragging ? 'grabbing' : 'crosshair', touchAction: 'none' }}
     >
       {/* Sample Data Warning Banner */}
       {isSampleData && (
@@ -341,17 +366,20 @@ export const FrameCanvas: React.FC<FrameCanvasProps> = ({
         )}
       </div>
 
-      {/* Viewport Zoom / Reset Controls (Bottom Right) */}
-      <div className="absolute bottom-3 right-3 z-20 flex items-center gap-1.5 bg-neutral-950/80 backdrop-blur border border-neutral-800 p-1 rounded">
+      {/* Viewport Zoom & Reticle Controls (Bottom Right) */}
+      <div className="absolute bottom-3 right-3 z-20 flex items-center gap-1.5 bg-neutral-950/85 backdrop-blur border border-neutral-800 px-2 py-1 rounded-lg shadow-lg">
         <button
           onClick={() => setShowReticle((prev) => !prev)}
           title="Toggle Center Reticle"
           className={`p-1.5 rounded text-xs transition ${
-            showReticle ? 'bg-cyan-500/20 text-cyan-300' : 'text-neutral-400 hover:text-neutral-200'
+            showReticle ? 'bg-cyan-500/20 text-cyan-300' : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800'
           }`}
         >
-          <Crosshair className="w-4 h-4" />
+          <Crosshair className="w-3.5 h-3.5" />
         </button>
+
+        <div className="h-3.5 w-px bg-neutral-800 mx-0.5" />
+
         <button
           onClick={() => setInterpolation((prev) => (prev === 'smooth' ? 'pixelated' : 'smooth'))}
           title={
@@ -365,30 +393,37 @@ export const FrameCanvas: React.FC<FrameCanvasProps> = ({
         >
           {interpolation === 'smooth' ? <Blend className="w-4 h-4" /> : <Grid className="w-4 h-4" />}
         </button>
+
         <button
-          onClick={() => setZoom((z) => Math.min(25.0, Math.round(z * 1.25 * 100) / 100))}
-          title="Zoom In"
-          className="p-1.5 rounded text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800 transition"
+          onClick={handleZoomOut}
+          title="Zoom Out (or scroll down over canvas)"
+          className="p-1.5 rounded text-neutral-300 hover:text-white hover:bg-neutral-800 transition cursor-pointer"
         >
-          <ZoomIn className="w-4 h-4" />
+          <ZoomOut className="w-3.5 h-3.5" />
         </button>
+
+        <span className="text-[11px] text-neutral-300 min-w-[38px] text-center font-mono font-medium">
+          {zoom === 1 ? '1.0× (Fit)' : `${zoom.toFixed(1)}×`}
+        </span>
+
         <button
-          onClick={() => setZoom((z) => Math.max(0.2, Math.round(z * 0.8 * 100) / 100))}
-          title="Zoom Out"
-          className="p-1.5 rounded text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800 transition"
+          onClick={handleZoomIn}
+          title="Zoom In (or scroll up over canvas)"
+          className="p-1.5 rounded text-neutral-300 hover:text-white hover:bg-neutral-800 transition cursor-pointer"
         >
-          <ZoomOut className="w-4 h-4" />
+          <ZoomIn className="w-3.5 h-3.5" />
         </button>
+
+        <div className="h-3.5 w-px bg-neutral-800 mx-0.5" />
+
         <button
           onClick={handleResetView}
           title="Reset Zoom & Pan (Fit to Viewport)"
-          className="p-1.5 rounded text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800 transition"
+          className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 transition cursor-pointer"
         >
-          <RotateCcw className="w-4 h-4" />
+          <RotateCcw className="w-3 h-3" />
+          <span>Reset</span>
         </button>
-        <span className="text-xs text-neutral-400 px-1 font-mono">
-          {zoom === 1 ? '1.0× (Fit)' : `${zoom.toFixed(1)}×`}
-        </span>
       </div>
 
       {/* Main Pixel Canvas Container (Fits Available Viewport Area) */}

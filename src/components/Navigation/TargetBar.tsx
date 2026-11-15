@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import type { SpherexBand } from '../../types/spherex';
 import { SPHEREX_BANDS, TEST_TARGETS } from '../../types/spherex';
-import { Target, Search, Globe, Loader2 } from 'lucide-react';
+import { Target, Search, Globe, Loader2, StopCircle } from 'lucide-react';
 import { resolveTargetQuery } from '../../utils/resolver';
 
 interface TargetBarProps {
@@ -15,6 +15,7 @@ interface TargetBarProps {
   isAladinOpen: boolean;
   onToggleAladin: () => void;
   isLoading: boolean;
+  onCancelSearch?: () => void;
 }
 
 export const TargetBar: React.FC<TargetBarProps> = ({
@@ -28,10 +29,33 @@ export const TargetBar: React.FC<TargetBarProps> = ({
   isAladinOpen,
   onToggleAladin,
   isLoading,
+  onCancelSearch,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [isResolving, setIsResolving] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+
+  // Local coordinate input state to prevent firing unbounded queries on every keystroke
+  const [raInput, setRaInput] = useState<string>(ra.toString());
+  const [decInput, setDecInput] = useState<string>(dec.toString());
+
+  React.useEffect(() => {
+    setRaInput(ra.toString());
+  }, [ra]);
+
+  React.useEffect(() => {
+    setDecInput(dec.toString());
+  }, [dec]);
+
+  const commitCoordinates = () => {
+    const parsedRa = parseFloat(raInput);
+    const parsedDec = parseFloat(decInput);
+    if (!isNaN(parsedRa) && !isNaN(parsedDec)) {
+      if (Math.abs(parsedRa - ra) > 1e-6 || Math.abs(parsedDec - dec) > 1e-6) {
+        onTargetChange(parsedRa, parsedDec);
+      }
+    }
+  };
 
   const handleSearchSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -83,6 +107,16 @@ export const TargetBar: React.FC<TargetBarProps> = ({
               'Find'
             )}
           </button>
+          {isLoading && onCancelSearch && (
+            <button
+              type="button"
+              onClick={onCancelSearch}
+              className="px-3 py-1.5 rounded-md bg-rose-600 hover:bg-rose-500 text-white font-medium text-xs transition flex items-center gap-1.5 shrink-0 shadow-sm animate-pulse"
+              title="Pause/Cancel current query and restore active view"
+            >
+              <StopCircle className="w-3.5 h-3.5" /> Stop Search
+            </button>
+          )}
         </form>
 
         {/* Aladin Lite Picker Toggle */}
@@ -116,15 +150,18 @@ export const TargetBar: React.FC<TargetBarProps> = ({
           return (
             <button
               key={target.name}
-              disabled={isLoading}
               onClick={() => onTargetChange(target.ra, target.dec, target.name)}
-              className={`px-2.5 py-1 rounded text-xs transition border ${
+              className={`px-2.5 py-1 rounded text-xs transition border flex items-center gap-1.5 ${
                 isSelected
                   ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50 font-semibold'
                   : 'bg-neutral-800/80 hover:bg-neutral-800 text-neutral-300 border-neutral-700/60'
-              } ${isLoading ? 'opacity-60 cursor-not-allowed' : ''}`}
+              }`}
+              title={`Switch to ${target.name} (RA: ${target.ra}°, Dec: ${target.dec}°)`}
             >
-              {target.name}
+              {isSelected && isLoading && (
+                <Loader2 className="w-3 h-3 text-cyan-400 animate-spin" />
+              )}
+              <span>{target.name}</span>
             </button>
           );
         })}
@@ -138,10 +175,14 @@ export const TargetBar: React.FC<TargetBarProps> = ({
           <input
             type="number"
             step="0.0001"
-            value={ra}
-            disabled={isLoading}
-            onChange={(e) => onTargetChange(parseFloat(e.target.value) || 0, dec)}
-            className="w-full bg-neutral-950 border border-neutral-800 rounded px-2.5 py-1.5 font-mono text-neutral-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+            value={raInput}
+            onChange={(e) => setRaInput(e.target.value)}
+            onBlur={commitCoordinates}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitCoordinates();
+            }}
+            title="Target Right Ascension. Press Enter or click away to apply."
+            className="w-full bg-neutral-950 border border-neutral-800 rounded px-2.5 py-1.5 font-mono text-neutral-200 focus:outline-none focus:border-cyan-500"
           />
         </div>
 
@@ -151,10 +192,14 @@ export const TargetBar: React.FC<TargetBarProps> = ({
           <input
             type="number"
             step="0.0001"
-            value={dec}
-            disabled={isLoading}
-            onChange={(e) => onTargetChange(ra, parseFloat(e.target.value) || 0)}
-            className="w-full bg-neutral-950 border border-neutral-800 rounded px-2.5 py-1.5 font-mono text-neutral-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+            value={decInput}
+            onChange={(e) => setDecInput(e.target.value)}
+            onBlur={commitCoordinates}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitCoordinates();
+            }}
+            title="Target Declination. Press Enter or click away to apply."
+            className="w-full bg-neutral-950 border border-neutral-800 rounded px-2.5 py-1.5 font-mono text-neutral-200 focus:outline-none focus:border-cyan-500"
           />
         </div>
 
@@ -163,9 +208,8 @@ export const TargetBar: React.FC<TargetBarProps> = ({
           <label className="text-neutral-400 block">Field of View:</label>
           <select
             value={fovDegrees}
-            disabled={isLoading}
             onChange={(e) => onFovChange(parseFloat(e.target.value))}
-            className="w-full bg-neutral-950 border border-neutral-800 rounded px-2.5 py-1.5 text-neutral-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+            className="w-full bg-neutral-950 border border-neutral-800 rounded px-2.5 py-1.5 text-neutral-200 focus:outline-none focus:border-cyan-500"
           >
             <option value={0.02}>0.02° (~1.2 arcmin)</option>
             <option value={0.05}>0.05° (~3.0 arcmin)</option>
@@ -184,9 +228,8 @@ export const TargetBar: React.FC<TargetBarProps> = ({
           </label>
           <select
             value={band}
-            disabled={isLoading}
             onChange={(e) => onBandChange(e.target.value as SpherexBand)}
-            className="w-full bg-neutral-950 border border-neutral-800 rounded px-2.5 py-1.5 text-cyan-300 font-medium focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+            className="w-full bg-neutral-950 border border-neutral-800 rounded px-2.5 py-1.5 text-cyan-300 font-medium focus:outline-none focus:border-cyan-500"
           >
             {Object.entries(SPHEREX_BANDS).map(([key, info]) => (
               <option key={key} value={key}>

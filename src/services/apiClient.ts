@@ -7,7 +7,7 @@ import type { SpherexApiResponse, SpherexBand, RgbCompositeData } from '../types
 const DEFAULT_BASE_URL =
   typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL
     ? import.meta.env.VITE_API_BASE_URL
-    : 'http://localhost:8000';
+    : 'http://127.0.0.1:8000';
 
 export const API_CONFIG = {
   // Member 1 FastAPI server base URL (configured via VITE_API_BASE_URL or settings)
@@ -37,8 +37,8 @@ export async function fetchSpherexSequence(params: {
     signal,
   } = params;
 
-  // Use 120s timeout budget for large FOV (> 0.25 deg) fresh IRSA cutouts, 60s otherwise
-  const effectiveTimeoutMs = timeoutMs ?? (size > 0.25 ? 120000 : 60000);
+  // Use 120s timeout budget by default to accommodate large FOV (0.50 deg) IRSA cutouts
+  const effectiveTimeoutMs = timeoutMs ?? 120000;
 
   // Real Level 2 SPHEREx observations are strictly served by Member 1's FastAPI backend.
   // Synthetic / fake astronomy datasets are disabled.
