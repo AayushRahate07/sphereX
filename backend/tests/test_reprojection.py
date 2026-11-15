@@ -152,3 +152,39 @@ def test_variance_reprojection(synthetic_fits_epoch1: fits.HDUList):
     assert res.variance.shape == (29, 29)
     assert not np.any(np.isnan(res.variance))
     assert np.all(res.variance >= 0.0)
+
+
+def test_cutout_dimension_and_plate_scale_calculation_across_supported_sizes():
+    """Verify cutout dimensions, plate scale conservation, and target centering across supported FOV sizes."""
+    target_ra = 133.795129
+    target_dec = -7.245147
+
+    test_cases = [
+        (0.05, 29, 29, 15.0, 15.0, 14.0, 14.0),
+        (0.25, 146, 146, 73.5, 73.5, 72.5, 72.5),
+        (0.50, 292, 292, 146.5, 146.5, 145.5, 145.5),
+    ]
+
+    for fov_deg, exp_w, exp_h, exp_crpix_x, exp_crpix_y, exp_tgt_x, exp_tgt_y in test_cases:
+        wcs, width, height = create_fixed_common_wcs(target_ra, target_dec, fov_deg, plate_scale_deg=DEFAULT_PLATE_SCALE_DEG)
+
+        assert width == exp_w
+        assert height == exp_h
+
+        # Plate scale strictly preserved
+        assert abs(wcs.wcs.cdelt[0]) == pytest.approx(DEFAULT_PLATE_SCALE_DEG)
+        assert abs(wcs.wcs.cdelt[1]) == pytest.approx(DEFAULT_PLATE_SCALE_DEG)
+
+        # FITS 1-based CRPIX
+        assert wcs.wcs.crpix[0] == pytest.approx(exp_crpix_x)
+        assert wcs.wcs.crpix[1] == pytest.approx(exp_crpix_y)
+
+        # 0-based projected target coordinate
+        cx, cy = wcs.all_world2pix(target_ra, target_dec, 0)
+        assert cx == pytest.approx(exp_tgt_x)
+        assert cy == pytest.approx(exp_tgt_y)
+
+        # Sky coverage calculation: width * plate_scale_deg is approximately fov_deg
+        sky_span = width * DEFAULT_PLATE_SCALE_DEG
+        assert sky_span == pytest.approx(fov_deg, abs=DEFAULT_PLATE_SCALE_DEG)
+

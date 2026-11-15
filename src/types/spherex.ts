@@ -75,7 +75,7 @@ export interface SpherexApiResponse {
   isSampleData?: boolean;
 }
 
-export type StretchType = 'linear' | 'log';
+export type StretchType = 'linear' | 'log' | 'asinh';
 
 // 5 Test Targets from Challenge
 export interface TargetPreset {
@@ -86,9 +86,45 @@ export interface TargetPreset {
 }
 
 export const TEST_TARGETS: TargetPreset[] = [
-  { name: 'WISE 0855', ra: 133.795129, dec: -7.245147, defaultFov: 0.05 },
-  { name: "Barnard's Star", ra: 269.452075, dec: 4.693364, defaultFov: 0.05 },
-  { name: 'Epsilon Indi B', ra: 330.8402, dec: -56.7865, defaultFov: 0.05 },
-  { name: 'RW Aurigae', ra: 77.1082, dec: 30.4014, defaultFov: 0.05 },
-  { name: 'R Draconis', ra: 247.5544, dec: 66.7029, defaultFov: 0.05 },
+  { name: 'WISE 0855', ra: 133.795129, dec: -7.245147, defaultFov: 0.25 },
+  { name: "Barnard's Star", ra: 269.452075, dec: 4.693364, defaultFov: 0.25 },
+  { name: 'Epsilon Indi B', ra: 330.8402, dec: -56.7865, defaultFov: 0.25 },
+  { name: 'RW Aurigae', ra: 77.1082, dec: 30.4014, defaultFov: 0.25 },
+  { name: 'R Draconis', ra: 247.5544, dec: 66.7029, defaultFov: 0.25 },
 ];
+
+export interface RgbChannelData {
+  band: SpherexBand;
+  wavelengthMicrons: number;
+  obsId: string;
+  mjd: number;
+  dateUtc: string;
+  flux: Float32Array;
+  flags: Uint8Array;
+  minFlux: number;
+  maxFlux: number;
+  p1Flux: number;
+  p99Flux: number;
+}
+
+export interface RgbCompositeData {
+  target: {
+    ra: number;
+    dec: number;
+    name?: string;
+  };
+  fovDegrees: number;
+  dataRelease: string;
+  wcs: WcsInfo;
+  width: number;
+  height: number;
+  channels: {
+    red: RgbChannelData;
+    green: RgbChannelData;
+    blue: RgbChannelData;
+  };
+  scientificNotice: string;
+  isSampleData?: boolean;
+}
+
+export type ViewMode = 'blink' | 'difference' | 'stacked' | 'shift-stack' | 'rgb';

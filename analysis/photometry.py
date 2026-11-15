@@ -40,9 +40,63 @@ from typing import Optional, Tuple
 import numpy as np
 
 from astropy.stats import sigma_clipped_stats
-from photutils.aperture import CircularAperture, CircularAnnulus, aperture_photometry
 
-from data_models import SPHERExFrame, QualityFlag, NOMINAL_PIXEL_SCALE_ARCSEC
+try:
+    from photutils.aperture import CircularAperture, CircularAnnulus, aperture_photometry
+    HAS_PHOTUTILS = True
+except (ImportError, ModuleNotFoundError):
+    HAS_PHOTUTILS = False
+
+    class CircularAperture:
+        """Lightweight circular aperture fallback when photutils is not installed."""
+        def __init__(self, positions: Tuple[float, float], r: float):
+            self.positions = positions
+            self.r = float(r)
+            self.area = np.pi * (self.r ** 2)
+
+        def to_mask(self, method: str = "center"):
+            xc, yc, r = self.positions[0], self.positions[1], self.r
+
+            class _ApertureMaskHelper:
+                def get_values(self, data: np.ndarray) -> np.ndarray:
+                    if data is None:
+                        return np.array([])
+                    ny, nx = data.shape
+                    y, x = np.ogrid[:ny, :nx]
+                    return data[(x - xc) ** 2 + (y - yc) ** 2 <= (r ** 2)]
+
+            return _ApertureMaskHelper()
+
+    class CircularAnnulus:
+        """Lightweight circular annulus fallback when photutils is not installed."""
+        def __init__(self, positions: Tuple[float, float], r_in: float, r_out: float):
+            self.positions = positions
+            self.r_in = float(r_in)
+            self.r_out = float(r_out)
+            self.area = np.pi * (self.r_out ** 2 - self.r_in ** 2)
+
+        def to_mask(self, method: str = "center"):
+            xc, yc, r_in, r_out = self.positions[0], self.positions[1], self.r_in, self.r_out
+
+            class _AnnulusMaskHelper:
+                def get_values(self, data: np.ndarray) -> np.ndarray:
+                    if data is None:
+                        return np.array([])
+                    ny, nx = data.shape
+                    y, x = np.ogrid[:ny, :nx]
+                    r_sq = (x - xc) ** 2 + (y - yc) ** 2
+                    return data[(r_sq >= r_in ** 2) & (r_sq < r_out ** 2)]
+
+            return _AnnulusMaskHelper()
+
+    def aperture_photometry(data: np.ndarray, aperture: CircularAperture) -> dict:
+        vals = aperture.to_mask().get_values(data)
+        return {"aperture_sum": [float(np.nansum(vals)) if len(vals) > 0 else 0.0]}
+
+try:
+    from data_models import SPHERExFrame, QualityFlag, NOMINAL_PIXEL_SCALE_ARCSEC
+except ImportError:
+    from analysis.data_models import SPHERExFrame, QualityFlag, NOMINAL_PIXEL_SCALE_ARCSEC
 
 
 @dataclass
@@ -138,74 +192,127 @@ def measure_aperture_photometry(
     if annulus_data is None or len(annulus_data) == 0:
         raise ValueError(f"Frame {frame.frame_id}: Annulus contains 0 pixels. Check cutout dimensions.")
 
-    # Exclude bad pixels / cosmic rays from sky background calculation
-    clean_annulus_indices = (annulus_flag_mask & (int(QualityFlag.BAD_PIXEL) | int(QualityFlag.COSMIC_RAY))) == 0
+    # Exclude bad pixels, cosmic rays, and saturated/edge pixels from sky background
+    annulus_fatal = int(
+        QualityFlag.BAD_PIXEL | QualityFlag.COSMIC_RAY | QualityFlag.EDGE_ARTIFACT | QualityFlag.SATURATED
+    )
+    clean_annulus_indices = np.isfinite(annulus_data) & ((annulus_flag_mask & annulus_fatal) == 0)
     clean_annulus_pixels = annulus_data[clean_annulus_indices]
 
     if len(clean_annulus_pixels) < 5:
-        # Fall back to all annulus pixels if too many were flagged
-        clean_annulus_pixels = annulus_data
+        # Fall back to finite annulus pixels if too many were flagged
+        finite_annulus = annulus_data[np.isfinite(annulus_data)]
+        if len(finite_annulus) > 0:
+            clean_annulus_pixels = finite_annulus
+        else:
+            clean_annulus_pixels = np.array([0.0])
         quality_flags |= int(QualityFlag.CALIBRATION_WARN)
 
     # Compute robust sigma-clipped mean, median, and standard deviation
     _, bg_median, bg_std = sigma_clipped_stats(clean_annulus_pixels, sigma=sigma_clip, maxiters=5)
-    bg_per_pixel = float(bg_median)
-    bg_rms = float(bg_std) if not np.isnan(bg_std) else 0.0
+    bg_per_pixel = float(bg_median) if np.isfinite(bg_median) else 0.0
+    bg_rms = float(bg_std) if np.isfinite(bg_std) else 0.0
 
-    # 5. Measure raw aperture flux
-    aper_table = aperture_photometry(frame.data, aperture)
-    raw_flux = float(aper_table["aperture_sum"][0])
+    # 5. Measure aperture pixels and identify invalid/flagged samples
     aperture_area = float(aperture.area)
     annulus_area = float(annulus.area)
 
-    # Net source flux in image data units
-    net_flux_raw = raw_flux - (aperture_area * bg_per_pixel)
-
-    # 6. Check saturation within aperture
     aper_mask = aperture.to_mask(method="center")
     aper_data = aper_mask.get_values(frame.data)
     raw_aper_flags = aper_mask.get_values(frame.mask)
-    aper_flags = raw_aper_flags.astype(np.int64) if raw_aper_flags is not None else None
+    aper_flags = raw_aper_flags.astype(np.int64) if raw_aper_flags is not None else np.array([], dtype=np.int64)
+    raw_aper_uncert = aper_mask.get_values(frame.uncertainty) if frame.uncertainty is not None else None
+    aper_uncert = raw_aper_uncert.astype(np.float64) if raw_aper_uncert is not None else np.array([], dtype=np.float64)
 
-    peak_pixel = float(np.max(aper_data)) if aper_data is not None and len(aper_data) > 0 else 0.0
+    n_total = len(aper_data)
+    fatal_mask = int(QualityFlag.BAD_PIXEL | QualityFlag.COSMIC_RAY | QualityFlag.EDGE_ARTIFACT)
+    is_bad = ((aper_flags & fatal_mask) > 0) | (~np.isfinite(aper_data))
+    is_sat = (aper_flags & int(QualityFlag.SATURATED)) > 0
+
+    peak_pixel = float(np.nanmax(aper_data)) if (len(aper_data) > 0 and np.any(np.isfinite(aper_data))) else 0.0
     is_saturated = False
-    if aper_flags is not None and np.any((aper_flags & int(QualityFlag.SATURATED)) > 0):
+    if np.any(is_sat) or peak_pixel >= saturation_threshold_mjy_sr:
         is_saturated = True
         quality_flags |= int(QualityFlag.SATURATED)
-    elif peak_pixel >= saturation_threshold_mjy_sr:
-        is_saturated = True
-        quality_flags |= int(QualityFlag.SATURATED)
+
+    if np.any(is_bad):
+        quality_flags |= int(QualityFlag.BAD_PIXEL)
+    if np.any((aper_flags & int(QualityFlag.EDGE_ARTIFACT)) > 0):
+        quality_flags |= int(QualityFlag.EDGE_ARTIFACT)
+    if np.any((aper_flags & int(QualityFlag.COSMIC_RAY)) > 0):
+        quality_flags |= int(QualityFlag.COSMIC_RAY)
+
+    # 6. Apply scientifically defensible bad-pixel policy for source aperture
+    n_valid = int(np.sum(~is_bad))
+    if n_valid == 0 or (n_valid / max(n_total, 1) < 0.5):
+        # Inadequate aperture coverage: reject measurement explicitly with NaN
+        quality_flags |= int(QualityFlag.BAD_PIXEL | QualityFlag.CALIBRATION_WARN)
+        raw_flux = np.nan
+        net_flux_raw = np.nan
+    elif n_valid < n_total:
+        # Partial aperture coverage: scale valid sum by area fraction and warn
+        quality_flags |= int(QualityFlag.BAD_PIXEL | QualityFlag.CALIBRATION_WARN)
+        valid_sum = float(np.sum(aper_data[~is_bad]))
+        raw_flux = valid_sum * (n_total / n_valid)
+        net_flux_raw = raw_flux - (float(n_total) * bg_per_pixel)
+    else:
+        # Full coverage
+        raw_flux = float(np.sum(aper_data))
+        net_flux_raw = raw_flux - (float(n_total) * bg_per_pixel)
 
     # 7. Propagate uncertainties
-    # A. Sum of pixel variance in aperture
-    uncert_sq_table = aperture_photometry(frame.uncertainty ** 2, aperture)
-    var_aper = float(uncert_sq_table["aperture_sum"][0])
-
-    # B. Variance of background estimate: (A_aper^2 / N_clean_annulus) * bg_rms^2
+    valid_unc = np.isfinite(aper_uncert) & (aper_uncert > 0.0) & (~is_bad)
+    n_unc_valid = int(np.sum(valid_unc))
     n_ann_clean = max(len(clean_annulus_pixels), 1)
-    var_bg = (aperture_area ** 2 / n_ann_clean) * (bg_rms ** 2)
+    var_bg = (float(n_total) ** 2 / n_ann_clean) * (bg_rms ** 2)
 
-    net_err_raw = np.sqrt(max(var_aper + var_bg, 1e-30))
+    if n_unc_valid == 0 or not np.isfinite(net_flux_raw):
+        # Unavailable uncertainty or invalid source flux
+        var_aper = np.nan
+        net_err_raw = np.nan
+        quality_flags |= int(QualityFlag.CALIBRATION_WARN)
+    else:
+        # For partial coverage where raw flux is scaled by c = (n_total / n_valid),
+        # linear error propagation dictates that Var(c * X) = c**2 * Var(X).
+        scale_c = float(n_total) / float(n_valid)
+        unc_coverage_ratio = float(n_valid) / float(n_unc_valid)
+        sum_unc_sq = float(np.sum(aper_uncert[valid_unc] ** 2))
+        var_aper = (scale_c ** 2) * unc_coverage_ratio * sum_unc_sq
+        if n_unc_valid < n_valid:
+            quality_flags |= int(QualityFlag.CALIBRATION_WARN)
+        net_err_raw = np.sqrt(max(var_aper + var_bg, 1e-30))
 
     # 8. Convert to physical flux density units (microJansky = uJy)
     if frame.flux_unit == "MJy/sr":
-        # Surface brightness to flux density:
-        # F_uJy = (MJy/sr) * Omega_pix_sr * 1e12
         unit_scale = frame.pixel_solid_angle_sr * 1e12
     elif frame.flux_unit in ["uJy/pixel", "uJy"]:
         unit_scale = 1.0
     else:
-        # Unknown unit: treat as raw and issue warning flag
         unit_scale = 1.0
         quality_flags |= int(QualityFlag.CALIBRATION_WARN)
 
-    flux_uJy = float(net_flux_raw * unit_scale * aperture_correction)
-    flux_err_uJy = float(net_err_raw * unit_scale * aperture_correction)
+    if np.isfinite(net_flux_raw):
+        flux_uJy = float(net_flux_raw * unit_scale * aperture_correction)
+    else:
+        flux_uJy = np.nan
+
+    if np.isfinite(net_err_raw):
+        flux_err_uJy = float(net_err_raw * unit_scale * aperture_correction)
+    else:
+        flux_err_uJy = np.nan
 
     # 9. Compute Signal-to-Noise Ratio (SNR)
-    snr = float(flux_uJy / flux_err_uJy) if flux_err_uJy > 0 else 0.0
-    if snr < 3.0:
+    if np.isfinite(flux_uJy) and np.isfinite(flux_err_uJy) and flux_err_uJy > 0:
+        snr = float(flux_uJy / flux_err_uJy)
+        if snr < 3.0:
+            quality_flags |= int(QualityFlag.LOW_SNR)
+    elif np.isfinite(flux_uJy) and flux_uJy <= 0:
+        # Valid measurement, but net flux non-positive after sky background subtraction
+        snr = 0.0
         quality_flags |= int(QualityFlag.LOW_SNR)
+    else:
+        # Rejected measurement: do NOT tag LOW_SNR; preserve rejection/calibration flags
+        snr = 0.0
 
     return PhotometryMeasurement(
         flux_uJy=flux_uJy,

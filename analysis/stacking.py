@@ -28,13 +28,36 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 import scipy.ndimage as ndimage
-from photutils.centroids import centroid_quadratic
 
-from data_models import (
-    SPHERExFrame,
-    QualityFlag,
-    NOMINAL_PIXEL_SCALE_ARCSEC,
-)
+try:
+    from photutils.centroids import centroid_quadratic
+except (ImportError, ModuleNotFoundError):
+    def centroid_quadratic(data: np.ndarray) -> Tuple[float, float]:
+        """Lightweight centroid fallback when photutils is not installed."""
+        total = np.nansum(data)
+        if total <= 0 or not np.isfinite(total):
+            ny, nx = data.shape
+            return (nx - 1) / 2.0, (ny - 1) / 2.0
+        y_ind, x_ind = np.indices(data.shape)
+        finite_data = np.where(np.isfinite(data), np.maximum(data, 0.0), 0.0)
+        tot = float(np.sum(finite_data))
+        if tot <= 0:
+            ny, nx = data.shape
+            return (nx - 1) / 2.0, (ny - 1) / 2.0
+        return float(np.sum(x_ind * finite_data) / tot), float(np.sum(y_ind * finite_data) / tot)
+
+try:
+    from data_models import (
+        SPHERExFrame,
+        QualityFlag,
+        NOMINAL_PIXEL_SCALE_ARCSEC,
+    )
+except ImportError:
+    from analysis.data_models import (
+        SPHERExFrame,
+        QualityFlag,
+        NOMINAL_PIXEL_SCALE_ARCSEC,
+    )
 
 
 def align_frame_to_center(
@@ -59,7 +82,8 @@ def align_frame_to_center(
     y_max = min(int(np.ceil(y_target + search_radius_pix + 1)), ny)
 
     search_box = frame.data[y_min:y_max, x_min:x_max]
-    y_pk_sub, x_pk_sub = np.unravel_index(np.argmax(search_box), search_box.shape)
+    clean_box = np.where(np.isfinite(search_box), search_box, -1e9)
+    y_pk_sub, x_pk_sub = np.unravel_index(np.argmax(clean_box), clean_box.shape)
     x_pk = x_min + int(x_pk_sub)
     y_pk = y_min + int(y_pk_sub)
 
@@ -90,9 +114,19 @@ def align_frame_to_center(
     if np.sqrt(dx ** 2 + dy ** 2) > max_shift_pix:
         dx, dy = 0.0, 0.0
 
-    # Shift arrays: scipy shift tuple is (shift_y, shift_x)
-    shifted_data = ndimage.shift(frame.data, shift=(dy, dx), order=3, mode="nearest")
-    shifted_uncert = ndimage.shift(frame.uncertainty, shift=(dy, dx), order=1, mode="nearest")
+    # Shift arrays: sanitize NaNs before spline interpolation so NaNs do not bleed
+    nan_data = ~np.isfinite(frame.data)
+    safe_data = np.where(nan_data, 0.0, frame.data)
+    shifted_data = ndimage.shift(safe_data, shift=(dy, dx), order=3, mode="nearest")
+    shifted_nan_data = ndimage.shift(nan_data.astype(np.float64), shift=(dy, dx), order=0, mode="nearest") > 0.5
+    shifted_data[shifted_nan_data] = np.nan
+
+    nan_u = ~np.isfinite(frame.uncertainty) | (frame.uncertainty <= 0.0)
+    safe_u = np.where(nan_u, 0.0, frame.uncertainty)
+    shifted_uncert = ndimage.shift(safe_u, shift=(dy, dx), order=1, mode="nearest")
+    shifted_nan_u = ndimage.shift(nan_u.astype(np.float64), shift=(dy, dx), order=0, mode="nearest") > 0.5
+    shifted_uncert[shifted_nan_u] = np.nan
+
     shifted_mask = ndimage.shift(frame.mask.astype(np.float64), shift=(dy, dx), order=0, mode="nearest").astype(np.int32)
 
     return shifted_data, shifted_uncert, shifted_mask, (dx, dy)
@@ -156,7 +190,10 @@ def stack_frames(
     shifted_data_list = []
     shifted_uncert_list = []
     shifted_mask_list = []
+    shifted_raw_flags_list = []
     shifts_applied = []
+
+    has_raw = any(f.raw_flags is not None for f in frames)
 
     for f in frames:
         if align_centroids:
@@ -165,81 +202,148 @@ def stack_frames(
             shifted_uncert_list.append(s_uncert)
             shifted_mask_list.append(s_mask)
             shifts_applied.append((dx, dy))
+            if has_raw and f.raw_flags is not None:
+                s_raw = ndimage.shift(f.raw_flags.astype(np.float64), shift=(dy, dx), order=0, mode="nearest").astype(np.int32)
+                shifted_raw_flags_list.append(s_raw)
         else:
             shifted_data_list.append(np.copy(f.data))
             shifted_uncert_list.append(np.copy(f.uncertainty))
             shifted_mask_list.append(np.copy(f.mask))
             shifts_applied.append((0.0, 0.0))
+            if has_raw and f.raw_flags is not None:
+                shifted_raw_flags_list.append(np.copy(f.raw_flags))
 
     data_cube = np.array(shifted_data_list)      # Shape: (N, ny, nx)
     uncert_cube = np.array(shifted_uncert_list)  # Shape: (N, ny, nx)
     mask_cube = np.array(shifted_mask_list)      # Shape: (N, ny, nx)
 
-    # 3. Coaddition Algorithms
+    # 3. Coaddition Algorithms with Strict Bad-Pixel Masking
     method = method.lower()
-    weights = 1.0 / np.maximum(uncert_cube ** 2, 1e-30)
+    fatal_mask = int(QualityFlag.BAD_PIXEL | QualityFlag.COSMIC_RAY | QualityFlag.EDGE_ARTIFACT)
+    valid_samples = np.isfinite(data_cube) & ((mask_cube & fatal_mask) == 0)
+
+    stacked_data = np.full((ny, nx), np.nan, dtype=np.float64)
+    stacked_uncert = np.full((ny, nx), np.nan, dtype=np.float64)
+    stacked_mask = np.zeros((ny, nx), dtype=np.int32)
 
     if method == "median":
-        stacked_data = np.median(data_cube, axis=0)
-        # Median noise propagation: sigma_med = 1.2533 * sigma / sqrt(N)
-        stacked_uncert = 1.2533 * np.median(uncert_cube, axis=0) / np.sqrt(n_frames)
+        for y in range(ny):
+            for x in range(nx):
+                v_mask = valid_samples[:, y, x]
+                if not np.any(v_mask):
+                    stacked_data[y, x] = np.nan
+                    stacked_uncert[y, x] = np.nan
+                    stacked_mask[y, x] |= int(QualityFlag.BAD_PIXEL)
+                else:
+                    d_vals = data_cube[v_mask, y, x]
+                    stacked_data[y, x] = float(np.median(d_vals))
+                    u_mask = v_mask & np.isfinite(uncert_cube[:, y, x]) & (uncert_cube[:, y, x] > 0)
+                    if np.any(u_mask):
+                        u_vals = uncert_cube[u_mask, y, x]
+                        stacked_uncert[y, x] = float(1.2533 * np.median(u_vals) / np.sqrt(len(u_vals)))
+                    else:
+                        stacked_uncert[y, x] = np.nan
+                        stacked_mask[y, x] |= int(QualityFlag.CALIBRATION_WARN)
 
     elif method == "mean":
-        if sigma_clip is not None and n_frames >= 3:
-            med = np.median(data_cube, axis=0)
-            std = np.std(data_cube, axis=0)
-            # Clip outliers
-            clipped_cube = np.copy(data_cube)
-            diff = np.abs(data_cube - med)
-            outliers = diff > (sigma_clip * np.maximum(std, 1e-10))
-            clipped_cube[outliers] = np.nan
-            stacked_data = np.nanmean(clipped_cube, axis=0)
-            # Fill any all-nan pixels with median
-            nan_mask = np.isnan(stacked_data)
-            stacked_data[nan_mask] = med[nan_mask]
-        else:
-            stacked_data = np.mean(data_cube, axis=0)
-
-        stacked_uncert = np.sqrt(np.sum(uncert_cube ** 2, axis=0)) / n_frames
+        for y in range(ny):
+            for x in range(nx):
+                v_mask = valid_samples[:, y, x]
+                if not np.any(v_mask):
+                    stacked_data[y, x] = np.nan
+                    stacked_uncert[y, x] = np.nan
+                    stacked_mask[y, x] |= int(QualityFlag.BAD_PIXEL)
+                else:
+                    d_vals = data_cube[v_mask, y, x]
+                    if sigma_clip is not None and len(d_vals) >= 3:
+                        med = np.median(d_vals)
+                        std = np.std(d_vals)
+                        diff = np.abs(d_vals - med)
+                        clean = diff <= (sigma_clip * max(float(std), 1e-10))
+                        if np.any(clean):
+                            d_vals = d_vals[clean]
+                    stacked_data[y, x] = float(np.mean(d_vals))
+                    u_mask = v_mask & np.isfinite(uncert_cube[:, y, x]) & (uncert_cube[:, y, x] > 0)
+                    if np.any(u_mask):
+                        u_vals = uncert_cube[u_mask, y, x]
+                        stacked_uncert[y, x] = float(np.sqrt(np.sum(u_vals ** 2)) / len(u_vals))
+                    else:
+                        stacked_uncert[y, x] = np.nan
+                        stacked_mask[y, x] |= int(QualityFlag.CALIBRATION_WARN)
 
     elif method == "weighted_mean":
-        if sigma_clip is not None and n_frames >= 3:
-            med = np.median(data_cube, axis=0)
-            std = np.std(data_cube, axis=0)
-            diff = np.abs(data_cube - med)
-            outliers = diff > (sigma_clip * np.maximum(std, 1e-10))
-            weights[outliers] = 0.0
+        for y in range(ny):
+            for x in range(nx):
+                v_mask = valid_samples[:, y, x]
+                if not np.any(v_mask):
+                    stacked_data[y, x] = np.nan
+                    stacked_uncert[y, x] = np.nan
+                    stacked_mask[y, x] |= int(QualityFlag.BAD_PIXEL)
+                else:
+                    u_mask = v_mask & np.isfinite(uncert_cube[:, y, x]) & (uncert_cube[:, y, x] > 0)
+                    if np.any(u_mask):
+                        d_vals = data_cube[u_mask, y, x]
+                        u_vals = uncert_cube[u_mask, y, x]
+                        w_vals = 1.0 / (u_vals ** 2)
 
-        weight_sum = np.sum(weights, axis=0)
-        zero_weights = weight_sum <= 0
-        weight_sum[zero_weights] = 1.0
+                        if sigma_clip is not None and len(d_vals) >= 3:
+                            med = np.median(d_vals)
+                            std = np.std(d_vals)
+                            diff = np.abs(d_vals - med)
+                            outliers = diff > (sigma_clip * max(float(std), 1e-10))
+                            w_vals[outliers] = 0.0
 
-        stacked_data = np.sum(weights * data_cube, axis=0) / weight_sum
-        # For pixels where all were clipped, fall back to simple median
-        if np.any(zero_weights):
-            med_fallback = np.median(data_cube, axis=0)
-            stacked_data[zero_weights] = med_fallback[zero_weights]
-
-        # Propagated uncertainty: 1 / sqrt(sum(w))
-        stacked_uncert = 1.0 / np.sqrt(weight_sum)
+                        w_sum = float(np.sum(w_vals))
+                        if w_sum > 0:
+                            stacked_data[y, x] = float(np.sum(w_vals * d_vals) / w_sum)
+                            stacked_uncert[y, x] = float(1.0 / np.sqrt(w_sum))
+                        else:
+                            stacked_data[y, x] = float(np.median(d_vals))
+                            stacked_uncert[y, x] = float(np.mean(u_vals))
+                            stacked_mask[y, x] |= int(QualityFlag.CALIBRATION_WARN)
+                    else:
+                        # Samples have valid flux, but all uncertainties are unavailable / NaN
+                        d_vals = data_cube[v_mask, y, x]
+                        stacked_data[y, x] = float(np.median(d_vals))
+                        stacked_uncert[y, x] = np.nan
+                        stacked_mask[y, x] |= int(QualityFlag.CALIBRATION_WARN)
 
     else:
         raise ValueError(f"Unknown stacking method '{method}'. Choose 'weighted_mean', 'median', or 'mean'.")
 
     # 4. Mask Consolidation
-    # Cosmic rays: transient artifact appearing in only 1 frame.
-    # Sigma-clipping rejected it, so the stacked frame is clean of transient cosmic rays!
-    # Permanent bad pixels: present across majority of frames.
     bad_pixel_flag = int(QualityFlag.BAD_PIXEL)
     persistent_bad = np.sum((mask_cube & bad_pixel_flag) > 0, axis=0) >= (n_frames // 2 + 1)
-
-    # Saturation: if any frame saturated, keep flag to warn user
     saturated_flag = int(QualityFlag.SATURATED)
     any_saturated = np.any((mask_cube & saturated_flag) > 0, axis=0)
 
-    stacked_mask = np.zeros((ny, nx), dtype=np.int32)
     stacked_mask[persistent_bad] |= bad_pixel_flag
     stacked_mask[any_saturated] |= saturated_flag
+
+    # Consolidate raw_flags if available:
+    # Stacked raw_flags reflects the contributing valid samples at each pixel.
+    # Rejected epoch defects (e.g. transients) do NOT contaminate the valid stacked pixel flags.
+    stacked_raw_flags = None
+    all_epochs_raw_flags = None
+    if len(shifted_raw_flags_list) > 0:
+        raw_cube = np.array(shifted_raw_flags_list, dtype=np.int32)
+        all_epochs_raw_flags = np.bitwise_or.reduce(raw_cube, axis=0)
+
+        masked_raw = np.where(valid_samples, raw_cube, 0)
+        stacked_raw_flags = np.bitwise_or.reduce(masked_raw, axis=0)
+
+        # Where ALL samples were invalid at a pixel, preserve all-epoch defect flags for diagnostics
+        has_any_valid = np.any(valid_samples, axis=0)
+        all_invalid = ~has_any_valid
+        stacked_raw_flags[all_invalid] = all_epochs_raw_flags[all_invalid]
+
+        # Consolidate persistent defects and saturation
+        if np.any(persistent_bad):
+            bad_raw = np.bitwise_or.reduce(np.where((mask_cube & bad_pixel_flag) > 0, raw_cube, 0), axis=0)
+            stacked_raw_flags[persistent_bad] |= bad_raw[persistent_bad]
+        if np.any(any_saturated):
+            sat_raw = np.bitwise_or.reduce(np.where((mask_cube & saturated_flag) > 0, raw_cube, 0), axis=0)
+            stacked_raw_flags[any_saturated] |= sat_raw[any_saturated]
 
     # 5. Metadata Consolidation
     total_exposure_s = sum(f.exposure_time_s for f in frames)
@@ -249,23 +353,16 @@ def stack_frames(
     stacked_flags = int(QualityFlag.GOOD)
     if np.any(any_saturated):
         stacked_flags |= int(QualityFlag.SATURATED)
-
-    meta = {
-        "stack_method": method,
-        "stacked_frame_count": n_frames,
-        "input_frame_ids": [f.frame_id for f in frames],
-        "applied_shifts_pixels": shifts_applied,
-        "theoretical_snr_boost": float(np.sqrt(n_frames)),
-        "is_coadded": True,
-    }
+    if np.any(persistent_bad):
+        stacked_flags |= int(QualityFlag.BAD_PIXEL)
 
     return SPHERExFrame(
         data=stacked_data,
         uncertainty=stacked_uncert,
         mask=stacked_mask,
-        frame_id=f"stacked_{method}_{n_frames}_frames",
+        frame_id=f"stacked_{ref_frame.frame_id}_{method}",
         mjd=mean_mjd,
-        timestamp_utc=ref_frame.timestamp_utc,
+        timestamp_utc=f"Stack_{n_frames}_epochs",
         detector_id=ref_det,
         band_name=ref_frame.band_name,
         wavelength_um=mean_wl,
@@ -273,9 +370,23 @@ def stack_frames(
         ra_deg=ref_frame.ra_deg,
         dec_deg=ref_frame.dec_deg,
         pixel_scale_arcsec=ref_frame.pixel_scale_arcsec,
-        flux_unit=ref_frame.flux_unit,
+        flux_unit=ref_unit,
         exposure_time_s=total_exposure_s,
         data_release=ref_frame.data_release,
         frame_quality_flags=stacked_flags,
-        additional_metadata=meta,
+        additional_metadata={
+            "n_frames_stacked": n_frames,
+            "stacked_frame_count": n_frames,
+            "stack_method": method,
+            "sigma_clip": sigma_clip,
+            "shifts_applied": shifts_applied,
+            "applied_shifts_pixels": shifts_applied,
+            "input_frames": [f.frame_id for f in frames],
+            "input_frame_ids": [f.frame_id for f in frames],
+            "theoretical_snr_boost": float(np.sqrt(n_frames)),
+            "is_coadded": True,
+            "raw_flags": stacked_raw_flags,
+            "all_epochs_raw_flags": all_epochs_raw_flags,
+        },
+        raw_flags=stacked_raw_flags,
     )

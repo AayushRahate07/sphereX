@@ -146,10 +146,13 @@ def extract_spectrum(
 
     # 5. Compile Rich Metadata
     det_counts = {det: sorted_dets.count(det) for det in all_detectors}
-    mean_snr = float(np.mean(sorted_snr)) if sorted_snr else 0.0
+    valid_snr = [s for s, fl in zip(sorted_snr, sorted_fluxes) if np.isfinite(fl) and np.isfinite(s)]
+    mean_snr = float(np.mean(valid_snr)) if valid_snr else 0.0
 
     metadata = {
         "total_channels": len(sorted_wl),
+        "valid_channels": len(valid_snr),
+        "rejected_channels": len(sorted_wl) - len(valid_snr),
         "observed_detectors": sorted(list(observed_detectors)),
         "detector_channel_counts": det_counts,
         "mean_snr": mean_snr,
@@ -222,8 +225,9 @@ def plot_spectrum(
             continue
 
         color = DETECTOR_PALETTE.get(det_id, "#333333")
-        # Standard good points
-        good_mask = mask & ((flags & (int(QualityFlag.SATURATED) | int(QualityFlag.LOW_SNR))) == 0)
+        # Standard good points (finite flux, no saturation, low SNR, or fatal defect)
+        fatal_bits = int(QualityFlag.SATURATED | QualityFlag.LOW_SNR | QualityFlag.BAD_PIXEL | QualityFlag.COSMIC_RAY)
+        good_mask = mask & np.isfinite(fl) & ((flags & fatal_bits) == 0)
         if np.any(good_mask):
             ax.errorbar(
                 wl[good_mask],
@@ -238,8 +242,8 @@ def plot_spectrum(
                 label=f"Detector {det_id} Data",
             )
 
-        # Flagged points (e.g. Saturated or Low SNR)
-        flagged_mask = mask & (~good_mask)
+        # Flagged points (e.g. Saturated or Low SNR) with finite flux
+        flagged_mask = mask & np.isfinite(fl) & (~good_mask)
         if np.any(flagged_mask):
             ax.errorbar(
                 wl[flagged_mask],
@@ -400,13 +404,20 @@ def extract_light_curve(
 
         # Convert to AB magnitude: m_AB = -2.5 * log10(F_Jy / 3631.0)
         # F_Jy = f_uJy * 1e-6
-        if f_uJy > 0:
+        if not np.isfinite(f_uJy):
+            # Measurement was rejected (e.g. bad pixels, missing data, edge artifact)
+            ab_mag = float("nan")
+            ab_err = float("nan")
+            # Do NOT tag LOW_SNR on a rejected measurement; retain existing rejection flags
+        elif f_uJy > 0:
             flux_jy = f_uJy * 1e-6
             ab_mag = float(-2.5 * np.log10(flux_jy / 3631.0))
-            # 1-sigma magnitude error: sigma_m = 1.08574 * (sigma_F / F)
-            ab_err = float(1.08574 * (f_err / f_uJy))
+            if np.isfinite(f_err) and f_err > 0:
+                ab_err = float(1.08574 * (f_err / f_uJy))
+            else:
+                ab_err = float("nan")
         else:
-            # Negative or zero flux after sky background subtraction
+            # Valid measurement with zero or negative flux after sky background subtraction
             ab_mag = float("nan")
             ab_err = float("nan")
             flag |= int(QualityFlag.LOW_SNR)
@@ -431,6 +442,7 @@ def extract_light_curve(
     # Flag large gaps (gap > 3x median cadence)
     gap_count = int(np.sum(diffs > (3.0 * median_cadence))) if median_cadence > 0 else 0
 
+    valid_fluxes = [f for f in fluxes if np.isfinite(f)]
     valid_mags = [m for m in ab_mags if not np.isnan(m)]
     min_mag = float(np.min(valid_mags)) if valid_mags else float("nan")
     max_mag = float(np.max(valid_mags)) if valid_mags else float("nan")
@@ -438,6 +450,8 @@ def extract_light_curve(
 
     metadata = {
         "total_epochs": len(mjds),
+        "valid_epoch_count": len(valid_fluxes),
+        "rejected_epoch_count": len(fluxes) - len(valid_fluxes),
         "detector_id": detector_id,
         "central_wavelength_um": median_wl,
         "wavelength_tolerance_um": wavelength_tolerance_um,

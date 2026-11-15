@@ -59,6 +59,95 @@ class QualityFlag(IntFlag):
     MISSING_FRAME = 1 << 6      # Bit 6 (64): Expected observation epoch or band unavailable
 
 
+# =============================================================================
+# SPHEREx Level 2 Official Mission Flag Bitmask Definitions (NASA/IPAC IRSA)
+# =============================================================================
+FLAG_TRANSIENT = 1 << 0        # 1: Cosmic ray hit / ramp transient event (Fatal)
+FLAG_OVERFLOW = 1 << 1         # 2: Saturated / overflow > ~50% well depth (Fatal)
+FLAG_SUR_ERROR = 1 << 2        # 4: Early sample-up-the-ramp readout error (Fatal)
+FLAG_NONFUNC = 1 << 6          # 64: Dead / non-functional detector pixel (Fatal)
+FLAG_DICHROIC = 1 << 7         # 128: Obscured / masked by dichroic layout (Fatal)
+FLAG_MISSING_DATA = 1 << 9     # 512: No readout data available (Fatal)
+FLAG_HOT = 1 << 10             # 1024: Hot / excessively noisy pixel (Fatal)
+FLAG_COLD = 1 << 11            # 2048: Cold / dead / unresponsive pixel (Fatal)
+FLAG_FULLSAMPLE = 1 << 12      # 4096: Full sample-up-the-ramp history available (Informational/High Quality)
+FLAG_PHANMISS = 1 << 14        # 16384: Phantom reference pixel missing anomaly (Fatal)
+FLAG_NONLINEAR = 1 << 15       # 32768: Severe uncorrectable non-linearity (Fatal)
+FLAG_PERSIST = 1 << 17         # 131072: Latent persistent charge contamination (Cautionary)
+FLAG_OUTLIER = 1 << 19         # 524288: Statistical outlier across ramps (Cautionary)
+FLAG_CROSSTALK = 1 << 20       # 1048576: Electronic crosstalk from another channel (Cautionary)
+FLAG_SOURCE = 1 << 21          # 2097152: Coincides with known catalog reference source (Informational/VALID)
+FLAG_GHOST = 1 << 22           # 4194304: Optical ghost reflection artifact (Cautionary)
+FLAG_GHOST_FPA = 1 << 23       # 8388608: Focal plane assembly reflection ghost (Cautionary)
+FLAG_GHOST_EXT = 1 << 24       # 16777216: Extended optical ghost artifact (Cautionary)
+FLAG_STREAK = 1 << 25          # 33554432: Satellite, debris, or asteroid streak (Cautionary)
+FLAG_BLOOM = 1 << 26           # 67108864: Blooming path from saturated neighbor (Fatal)
+FLAG_SNOWBALL = 1 << 27        # 134217728: Energetic particle hit core (Fatal)
+FLAG_HALO = 1 << 28            # 268435456: Scattered light halo from bright star (Cautionary)
+FLAG_SATELLITE_HALO = 1 << 29  # 536870912: Satellite glint stray light halo (Cautionary)
+
+
+def normalize_quality_flags(
+    raw_flags: np.ndarray,
+    is_mission_flags: bool = True,
+) -> np.ndarray:
+    """
+    Normalize raw FITS quality bitmasks into analysis-quality QualityFlag bitmasks.
+
+    Distinguishes:
+    - Official 32-bit SPHEREx Level 2 flags (HDU 2 'FLAGS')
+    - Legacy / Mock 7-bit analysis flags (HDU 3 'MASK')
+
+    Guarantees:
+    - FLAG_SOURCE (2097152) and FLAG_FULLSAMPLE (4096) are preserved in raw_flags
+      and NEVER mapped to fatal QualityFlag defects.
+    - True fatal pixel conditions (OVERFLOW, BLOOM, TRANSIENT, SNOWBALL, NONFUNC,
+      SUR_ERROR, DICHROIC, HOT, COLD, etc.) map to SATURATED, COSMIC_RAY, or BAD_PIXEL.
+    - Cautionary conditions map to CALIBRATION_WARN.
+    """
+    if not is_mission_flags:
+        return raw_flags.copy().astype(np.int32)
+
+    norm_mask = np.zeros(raw_flags.shape, dtype=np.int32)
+
+    # 1. Saturated pixels: overflow or blooming
+    sat_bits = FLAG_OVERFLOW | FLAG_BLOOM
+    norm_mask[(raw_flags & sat_bits) > 0] |= int(QualityFlag.SATURATED)
+
+    # 2. Cosmic ray hits & energetic particle cores (transients)
+    cr_bits = FLAG_TRANSIENT | FLAG_SNOWBALL
+    norm_mask[(raw_flags & cr_bits) > 0] |= int(QualityFlag.COSMIC_RAY)
+
+    # 3. Fatal detector defects
+    fatal_defect_bits = (
+        FLAG_SUR_ERROR
+        | FLAG_NONFUNC
+        | FLAG_DICHROIC
+        | FLAG_MISSING_DATA
+        | FLAG_HOT
+        | FLAG_COLD
+        | FLAG_PHANMISS
+        | FLAG_NONLINEAR
+    )
+    norm_mask[(raw_flags & fatal_defect_bits) > 0] |= int(QualityFlag.BAD_PIXEL)
+
+    # 4. Cautionary artifacts: mark with CALIBRATION_WARN
+    caution_bits = (
+        FLAG_PERSIST
+        | FLAG_OUTLIER
+        | FLAG_CROSSTALK
+        | FLAG_GHOST
+        | FLAG_GHOST_FPA
+        | FLAG_GHOST_EXT
+        | FLAG_STREAK
+        | FLAG_HALO
+        | FLAG_SATELLITE_HALO
+    )
+    norm_mask[(raw_flags & caution_bits) > 0] |= int(QualityFlag.CALIBRATION_WARN)
+
+    return norm_mask
+
+
 # -----------------------------------------------------------------------------
 # Shared Input Model: SPHERExFrame (Member 2 -> Member 3)
 # -----------------------------------------------------------------------------
@@ -68,12 +157,17 @@ class SPHERExFrame:
     A single localized image cutout and associated metadata from SPHEREx.
     This is the core data format provided by the Member 2 (Backend) data pipeline.
 
-    Scientific Units:
-    -----------------
+    Scientific Units & Contracts:
+    -----------------------------
     - `data`: 2D float array in physical units (typically 'MJy/sr' for surface
               brightness or 'uJy/pixel' for calibrated flux density).
-    - `uncertainty`: 2D float array representing 1-sigma Gaussian error per pixel.
-    - `mask`: 2D integer bitmask representing pixel-level quality flags.
+    - `uncertainty`: 2D float array representing 1-sigma Gaussian error per pixel
+              (standard deviation sigma, NOT variance sigma^2). Unavailable or
+              uncalibrated uncertainty is represented as NaN.
+    - `mask`: 2D integer bitmask representing normalized pixel-level quality flags
+              conforming to the QualityFlag enum.
+    - `raw_flags`: Optional 2D integer array preserving the original, unmodified
+              32-bit SPHEREx Level 2 mission flag bitmask from FITS 'FLAGS' extension.
     - `wavelength_um`: Central wavelength in micrometers (microns).
     - `pixel_scale_arcsec`: Pixel angular scale in arcseconds (nominal 6.2).
     """
@@ -95,6 +189,7 @@ class SPHERExFrame:
     data_release: str = "DR1"
     frame_quality_flags: int = QualityFlag.GOOD
     additional_metadata: Dict[str, Any] = field(default_factory=dict)
+    raw_flags: Optional[np.ndarray] = None
 
     def __post_init__(self) -> None:
         """Validate array dimensions, types, and physical limits."""
@@ -111,6 +206,15 @@ class SPHERExFrame:
                 raise TypeError(f"Frame {self.frame_id}: '{name}' must be a numpy.ndarray, got {type(arr)}")
             if arr.ndim != 2:
                 raise ValueError(f"Frame {self.frame_id}: '{name}' must be a 2D array, got shape {arr.shape}")
+
+        # Validate raw_flags if present
+        if self.raw_flags is not None:
+            if not isinstance(self.raw_flags, np.ndarray):
+                raise TypeError(f"Frame {self.frame_id}: 'raw_flags' must be a numpy.ndarray, got {type(self.raw_flags)}")
+            if self.raw_flags.shape != self.data.shape:
+                raise ValueError(
+                    f"Shape mismatch: 'data' is {self.data.shape} but 'raw_flags' is {self.raw_flags.shape}"
+                )
 
         # 2. Check shape consistency across data, uncertainty, and mask
         if self.data.shape != self.uncertainty.shape:

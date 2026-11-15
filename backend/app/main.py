@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.config import FITS_CACHE_DIR, TAP_CACHE_DIR
-from backend.app.routers import frames_router, health_router
+from backend.app.routers import frames_router, health_router, rgb_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,6 +40,7 @@ app.add_middleware(
 # Register API routes
 app.include_router(health_router)
 app.include_router(frames_router)
+app.include_router(rgb_router)
 
 
 @app.get("/")

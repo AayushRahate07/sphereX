@@ -27,7 +27,12 @@ export function parseUrlState(): Partial<ViewStateParams> {
   if (params.has('dec')) parsed.dec = parseFloat(params.get('dec')!);
   if (params.has('size')) parsed.size = parseFloat(params.get('size')!);
   if (params.has('band')) parsed.band = params.get('band') as SpherexBand;
-  if (params.has('speed')) parsed.speed = parseInt(params.get('speed')!, 10);
+  if (params.has('speed')) {
+    const val = parseFloat(params.get('speed')!);
+    if (!isNaN(val) && val > 0) {
+      parsed.speed = Math.round(val * 100) / 100;
+    }
+  }
   if (params.has('stretch')) parsed.stretch = params.get('stretch') as StretchType;
   if (params.has('invert')) parsed.invert = params.get('invert') === '1' || params.get('invert') === 'true';
   if (params.has('min')) parsed.min = parseFloat(params.get('min')!);
@@ -52,12 +57,18 @@ export function syncUrlState(state: ViewStateParams): void {
   params.set('dec', state.dec.toFixed(6));
   params.set('size', state.size.toString());
   params.set('band', state.band);
-  params.set('speed', state.speed.toString());
+  params.set('speed', (Math.round(state.speed * 100) / 100).toString());
   params.set('stretch', state.stretch);
   params.set('invert', state.invert ? '1' : '0');
 
-  if (state.min !== undefined) params.set('min', state.min.toFixed(1));
-  if (state.max !== undefined) params.set('max', state.max.toFixed(1));
+  if (state.min !== undefined) {
+    const prec = state.max !== undefined && Math.abs(state.max - state.min) < 5 ? 3 : 1;
+    params.set('min', state.min.toFixed(prec));
+  }
+  if (state.max !== undefined) {
+    const prec = state.min !== undefined && Math.abs(state.max - state.min) < 5 ? 3 : 1;
+    params.set('max', state.max.toFixed(prec));
+  }
   if (state.embed) params.set('embed', '1');
   if (state.maxFrames !== undefined) params.set('max_frames', state.maxFrames.toString());
 

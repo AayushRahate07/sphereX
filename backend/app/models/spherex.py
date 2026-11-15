@@ -2,7 +2,7 @@
 Strictly aligned with TypeScript definitions in src/types/spherex.ts.
 """
 
-from typing import List, Literal, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 from pydantic import BaseModel, Field
 
 # Valid SPHEREx detector bands
@@ -66,3 +66,31 @@ class SpherexApiResponse(BaseModel):
     frames: List[SpherexFrame] = Field(..., description="Chronological list of aligned frames")
     markers: Optional[List[CatalogMarker]] = Field(None, description="Catalog overlay markers")
     isSampleData: bool = Field(False, description="Flag indicating synthetic vs real science data")
+
+
+class RgbChannelInfo(BaseModel):
+    """Calibrated science data and robust display limits for a single RGB color channel."""
+    band: SpherexBand = Field(..., description="SPHEREx detector bandpass identifier")
+    wavelengthMicrons: float = Field(..., description="Central spectral wavelength in microns")
+    obsId: str = Field(..., description="Source SPHEREx observation ID")
+    mjd: float = Field(..., description="Observation Modified Julian Date")
+    dateUtc: str = Field(..., description="Observation timestamp in UTC ISO format")
+    flux: List[float] = Field(..., description="Calibrated surface brightness array in MJy/sr (row-major)")
+    flags: List[int] = Field(..., description="Binary quality flags (0 = clean, 1 = invalid)")
+    minFlux: float = Field(..., description="Minimum valid flux across clean pixels")
+    maxFlux: float = Field(..., description="Maximum valid flux across clean pixels")
+    p1Flux: float = Field(..., description="1st percentile flux across clean pixels")
+    p99Flux: float = Field(..., description="99th percentile flux across clean pixels")
+
+
+class RgbCompositeResponse(BaseModel):
+    """API response model for multi-band false-color infrared RGB composite."""
+    target: TargetInfo = Field(..., description="Target metadata")
+    fovDegrees: float = Field(..., description="Field of view in degrees")
+    dataRelease: str = Field(..., description="SPHEREx data release version")
+    wcs: WcsInfo = Field(..., description="Shared common celestial tangent plane WCS")
+    width: int = Field(..., description="Composite image width in pixels")
+    height: int = Field(..., description="Composite image height in pixels")
+    channels: Dict[str, RgbChannelInfo] = Field(..., description="Dictionary mapping 'red', 'green', 'blue' to channel data")
+    scientificNotice: str = Field(..., description="Scientific provenance notice clarifying false-color infrared visualization")
+    isSampleData: bool = Field(False, description="Strictly False for real observations")

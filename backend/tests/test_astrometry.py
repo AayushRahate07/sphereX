@@ -206,3 +206,54 @@ def test_cache_rejection_of_legacy_cutout_for_propagated_coordinates(tmp_path: P
             "TEST_001", "SPHEREx-D6", 0.05, center_ra=133.7613, center_dec=-7.2423
         )
         assert cached_coord == coord_file
+
+
+def test_barnards_star_astrometry_preset_configuration():
+    """Verify Barnard's Star astrometric parameters match verified literature values."""
+    astro = get_target_astrometry(269.452075, 4.693364)
+    assert astro is not None
+    assert astro.reference_epoch == pytest.approx(2000.0, abs=0.01)
+    assert astro.reference_ra == pytest.approx(269.452075, abs=1e-5)
+    assert astro.reference_dec == pytest.approx(4.693364, abs=1e-5)
+    assert astro.pm_ra_cosdec == pytest.approx(-798.58, abs=1.0)
+    assert astro.pm_dec == pytest.approx(10328.12, abs=1.0)
+    assert astro.parallax_mas == pytest.approx(547.45, abs=1.0)
+
+    # By name lookup
+    astro_name = get_target_astrometry(0.0, 0.0, name="Barnard's Star")
+    assert astro_name is not None
+    assert astro_name == astro
+
+
+def test_propagate_coordinates_barnards_star_25year_motion():
+    """Verify Barnard's Star propagates ~265 arcseconds North over 25.6 years to August 2025."""
+    # Reference epoch 2000.0 -> Observation epoch August 28, 2025 (MJD 60915.0)
+    # Target observation 2025W35_1A_0432_4
+    ra_2025, dec_2025 = propagate_coordinates_to_epoch(
+        269.452075, 4.693364, epoch="2025-08-28T00:00:00", target_name="Barnard's Star"
+    )
+
+    # Delta Dec is ~ +265 arcseconds (+0.0736 degrees = ~43 pixels at 6.16"/pix)
+    ddec_arcsec = (dec_2025 - 4.693364) * 3600.0
+    dra_arcsec = (ra_2025 - 269.452075) * np.cos(np.radians(4.693364)) * 3600.0
+
+    assert 260.0 < ddec_arcsec < 270.0
+    assert -25.0 < dra_arcsec < -15.0
+    assert ra_2025 == pytest.approx(269.4462, abs=0.005)
+    assert dec_2025 == pytest.approx(4.7670, abs=0.005)
+
+
+def test_epsilon_indi_b_astrometry_preset_configuration():
+    """Verify Epsilon Indi B astrometry config and southward proper motion propagation."""
+    astro = get_target_astrometry(330.840200, -56.786500)
+    assert astro is not None
+    assert astro.pm_ra_cosdec == pytest.approx(3961.0, abs=1.0)
+    assert astro.pm_dec == pytest.approx(-2538.0, abs=1.0)
+
+    ra_2025, dec_2025 = propagate_coordinates_to_epoch(
+        330.840200, -56.786500, epoch="2025-05-01T00:00:00", target_name="Epsilon Indi B"
+    )
+    # Dec moves South (negative delta Dec) by ~64 arcsec over 25.3 years
+    ddec_arcsec = (dec_2025 - (-56.786500)) * 3600.0
+    assert -70.0 < ddec_arcsec < -58.0
+

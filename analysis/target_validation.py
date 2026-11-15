@@ -239,7 +239,10 @@ def validate_target_observations(
         total_saturated_pixels += np.sum((f.mask & int(QualityFlag.SATURATED)) > 0)
         max_peak_value = max(max_peak_value, meas.peak_pixel_value)
 
-        if meas.snr >= 3.0:
+        if not np.isfinite(meas.flux_uJy):
+            # Measurement was rejected due to aperture defects; do not count as valid detection or non-detection
+            continue
+        elif meas.snr >= 3.0:
             detections_snr_gte_3 += 1
         else:
             non_detections_snr_lt_3 += 1

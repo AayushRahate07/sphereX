@@ -19,11 +19,11 @@ IRSA_TAP_URL = "https://irsa.ipac.caltech.edu/TAP/sync"
 IRSA_DATALINK_URL = "https://irsa.ipac.caltech.edu/datalink/links/spherex"
 
 # Optical & Astrometric defaults
-DEFAULT_FOV_DEG = 0.05
+DEFAULT_FOV_DEG = 0.25
 DEFAULT_PLATE_SCALE_DEG = 0.001712  # ~6.1632 arcsec/pixel
 DEFAULT_BAND = "SPHEREx-D6"
 DEFAULT_RELEASE = "DR1"
-DEFAULT_MAX_FRAMES = 10
+DEFAULT_MAX_FRAMES = 5
 ABSOLUTE_MAX_FRAMES = 50
 
 # Supported detector bands strictly aligned with src/types/spherex.ts
@@ -68,7 +68,7 @@ TARGET_PRESETS: List[Dict[str, Any]] = [
         "name": "WISE 0855",
         "ra": 133.795129,
         "dec": -7.245147,
-        "defaultFov": 0.05,
+        "defaultFov": 0.25,
         "astrometry": AstrometryConfig(
             reference_ra=133.795129,
             reference_dec=-7.245147,
@@ -78,8 +78,34 @@ TARGET_PRESETS: List[Dict[str, Any]] = [
             parallax_mas=439.0,
         ),
     },
-    {"name": "Barnard's Star", "ra": 269.452075, "dec": 4.693364, "defaultFov": 0.05, "astrometry": None},
-    {"name": "Epsilon Indi B", "ra": 330.840200, "dec": -56.786500, "defaultFov": 0.05, "astrometry": None},
-    {"name": "RW Aurigae", "ra": 77.108200, "dec": 30.401400, "defaultFov": 0.05, "astrometry": None},
-    {"name": "R Draconis", "ra": 247.554400, "dec": 66.702900, "defaultFov": 0.05, "astrometry": None},
+    {
+        "name": "Barnard's Star",
+        "ra": 269.452075,
+        "dec": 4.693364,
+        "defaultFov": 0.25,
+        "astrometry": AstrometryConfig(
+            reference_ra=269.452075,
+            reference_dec=4.693364,
+            reference_epoch=2000.0,
+            pm_ra_cosdec=-798.58,
+            pm_dec=10328.12,
+            parallax_mas=547.45,
+        ),
+    },
+    {
+        "name": "Epsilon Indi B",
+        "ra": 330.840200,
+        "dec": -56.786500,
+        "defaultFov": 0.25,
+        "astrometry": AstrometryConfig(
+            reference_ra=330.840200,
+            reference_dec=-56.786500,
+            reference_epoch=2000.0,
+            pm_ra_cosdec=3961.0,
+            pm_dec=-2538.0,
+            parallax_mas=275.5,
+        ),
+    },
+    {"name": "RW Aurigae", "ra": 77.108200, "dec": 30.401400, "defaultFov": 0.25, "astrometry": None},
+    {"name": "R Draconis", "ra": 247.554400, "dec": 66.702900, "defaultFov": 0.25, "astrometry": None},
 ]

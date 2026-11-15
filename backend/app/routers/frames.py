@@ -5,6 +5,7 @@ a fixed, target-centered common sky grid matching the frontend contract.
 """
 
 import logging
+import time
 from typing import Dict, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, Query, status
 
@@ -66,6 +67,7 @@ def get_frames(
     max_frames: int = Query(DEFAULT_MAX_FRAMES, description="Maximum number of frames to return", ge=1, le=ABSOLUTE_MAX_FRAMES),
 ) -> SpherexApiResponse:
     """Execute the vertical slice pipeline: Selection -> Retrieval -> Reprojection -> API Delivery."""
+    t_endpoint_start = time.perf_counter()
     # 1. Parameter Validation
     if band not in SUPPORTED_BANDS:
         raise HTTPException(
@@ -77,6 +79,7 @@ def get_frames(
     astro = get_target_astrometry(ra, dec, name=preset_name)
 
     # 2. Observation Selection
+    t_sel_start = time.perf_counter()
     try:
         selected_obs = select_observations_for_target(
             ra=ra,
@@ -97,7 +100,14 @@ def get_frames(
             detail=f"Failed to query IRSA observation archive: {err}",
         ) from err
 
+    sel_dur_ms = (time.perf_counter() - t_sel_start) * 1000
+    logger.info(
+        "[TIMING] Observation selection for %s (%s, FOV=%.2f): found %d frames in %.2fms",
+        preset_name or f"({ra:.4f}, {dec:.4f})", band, size, len(selected_obs), sel_dur_ms
+    )
+
     # Compute epoch-propagated coordinates per observation
+    t_coord_start = time.perf_counter()
     coords_per_obs: Dict[str, Tuple[float, float]] = {}
     for obs in selected_obs:
         if astro is not None:
@@ -122,6 +132,8 @@ def get_frames(
         fov_deg=size,
         plate_scale_deg=DEFAULT_PLATE_SCALE_DEG,
     )
+    coord_dur_ms = (time.perf_counter() - t_coord_start) * 1000
+    logger.debug("[TIMING] Fixed common WCS (%dx%d) and coordinate propagation completed in %.2fms", out_width, out_height, coord_dur_ms)
 
     wcs_model = WcsInfo(
         crval=(grid_anchor_ra, grid_anchor_dec),
@@ -148,9 +160,11 @@ def get_frames(
             detail=f"Failed to retrieve cutouts from IRSA IBE: {err}",
         ) from err
 
-    # If any selected observations failed to retrieve, attempt bounded fallback
-    # across remaining candidates to satisfy the requested frame count.
-    if len(retrieved_paths) < max_frames:
+    # If fewer than 2 frames were retrieved, attempt a small, bounded fallback
+    # across at most 2 remaining candidates to achieve a minimal multi-epoch blink sequence.
+    # We do NOT run fallback if >= 2 frames are already available, avoiding 30s timeouts.
+    min_required_for_blink = min(2, max_frames)
+    if len(retrieved_paths) < min_required_for_blink:
         try:
             all_candidates = select_observations_for_target(
                 ra=ra,
@@ -162,13 +176,14 @@ def get_frames(
             )
             already_attempted = {obs.obs_id for obs in selected_obs}
             remaining_candidates = [c for c in all_candidates if c.obs_id not in already_attempted]
-            shortfall = max_frames - len(retrieved_paths)
+            shortfall = min_required_for_blink - len(retrieved_paths)
             if remaining_candidates and shortfall > 0:
+                candidates_to_try = remaining_candidates[:min(2, shortfall)]
                 logger.info(
-                    "Attempting fallback retrieval for %d shortfall frames from %d remaining candidates...",
-                    shortfall, len(remaining_candidates)
+                    "Attempting bounded fallback retrieval for %d shortfall frames from %d remaining candidates...",
+                    len(candidates_to_try), len(remaining_candidates)
                 )
-                for cand in remaining_candidates[:shortfall * 2]:
+                for cand in candidates_to_try:
                     if cand.obs_id not in coords_per_obs:
                         if astro is not None:
                             coords_per_obs[cand.obs_id] = propagate_coordinates_to_epoch(ra, dec, cand.mjd, target_name=preset_name)
@@ -176,7 +191,7 @@ def get_frames(
                             coords_per_obs[cand.obs_id] = (ra, dec)
 
                 extra_retrieved = batch_retrieve_cutouts(
-                    observations=remaining_candidates[:shortfall * 2],
+                    observations=candidates_to_try,
                     ra=ra,
                     dec=dec,
                     size_deg=size,
@@ -185,7 +200,7 @@ def get_frames(
                     coords_per_obs=coords_per_obs,
                 )
                 retrieved_paths.update(extra_retrieved)
-                for cand in remaining_candidates:
+                for cand in candidates_to_try:
                     if cand.obs_id in extra_retrieved and cand not in selected_obs:
                         selected_obs.append(cand)
         except Exception as exc:
@@ -209,12 +224,16 @@ def get_frames(
 
         fits_path = retrieved_paths[obs.obs_id]
         try:
+            t_parse_start = time.perf_counter()
             parsed = parse_fits_cutout(
                 source=fits_path,
                 band=band,
                 fallback_obs_id=obs.obs_id,
                 fallback_mjd=obs.mjd,
             )
+            parse_dur_ms = (time.perf_counter() - t_parse_start) * 1000
+
+            t_reproj_start = time.perf_counter()
             reprojected = reproject_observation_to_grid(
                 observation=parsed,
                 target_ra=grid_anchor_ra,
@@ -223,6 +242,13 @@ def get_frames(
                 out_width=out_width,
                 out_height=out_height,
                 interpolation_order=1,
+            )
+            reproj_dur_ms = (time.perf_counter() - t_reproj_start) * 1000
+
+            file_size = fits_path.stat().st_size if fits_path.exists() else 0
+            logger.info(
+                "[TIMING] Frame %s parsed (%d bytes) in %.2fms, reprojected (%dx%d) in %.2fms",
+                obs.obs_id, file_size, parse_dur_ms, out_width, out_height, reproj_dur_ms
             )
 
             # Format 1D arrays matching frontend contract
@@ -276,6 +302,12 @@ def get_frames(
             label=f"{preset_name} (Target)" if preset_name else "Target Center",
         )
     ]
+
+    total_dur = time.perf_counter() - t_endpoint_start
+    logger.info(
+        "[TIMING] /api/frames complete: target=%s fov=%.2f deg, band=%s, frames=%d/%d in %.2fs",
+        preset_name or f"({ra:.4f}, {dec:.4f})", size, band, len(frames), len(selected_obs), total_dur
+    )
 
     return SpherexApiResponse(
         target=target_info,

@@ -171,6 +171,8 @@ export const TargetBar: React.FC<TargetBarProps> = ({
             <option value={0.05}>0.05° (~3.0 arcmin)</option>
             <option value={0.1}>0.10° (~6.0 arcmin)</option>
             <option value={0.2}>0.20° (~12.0 arcmin)</option>
+            <option value={0.25}>0.25° (~15.0 arcmin, Default)</option>
+            <option value={0.5}>0.50° (~30.0 arcmin)</option>
           </select>
         </div>
 

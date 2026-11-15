@@ -9,10 +9,16 @@ survey FITS generation for testing and offline execution.
 Standards & Conventions:
 ------------------------
 - FITS Extension Format: Multi-Extension FITS (MEF)
-    * HDU 0: PRIMARY (telescope & observation metadata)
-    * HDU 1: 'SCI' (calibrated surface brightness image, MJy/sr, with WCS)
-    * HDU 2: 'UNCERT' (1-sigma error per pixel, MJy/sr)
-    * HDU 3: 'MASK' (quality flag bitmask, int32)
+    * Official NASA/IPAC IRSA Level 2 Cutouts:
+        - HDU 0: PRIMARY (telescope, pointing, and observation metadata)
+        - HDU 1: 'IMAGE' (calibrated surface brightness image, MJy/sr, with WCS)
+        - HDU 2: 'FLAGS' (32-bit quality flag bitmask, int32)
+        - HDU 3: 'VARIANCE' (variance in (MJy/sr)^2, float32)
+    * Legacy / Mock Survey FITS:
+        - HDU 0: PRIMARY (telescope & observation metadata)
+        - HDU 1: 'SCI' (calibrated surface brightness image, MJy/sr, with WCS)
+        - HDU 2: 'UNCERT' (1-sigma error per pixel, MJy/sr)
+        - HDU 3: 'MASK' (quality flag bitmask, int32)
 - Coordinate System: ICRS / J2000
 - Projection: Gnomonic / Tangential ('RA---TAN', 'DEC--TAN')
 - Plate Scale: 6.2 arcsec/pixel (0.00172222 deg/pixel)
@@ -32,13 +38,22 @@ from astropy.coordinates import SkyCoord
 import astropy.units as u
 from astropy.nddata import Cutout2D
 
-from data_models import (
-    SPHERExFrame,
-    QualityFlag,
-    SPHEREX_DETECTOR_BANDS,
-    NOMINAL_PIXEL_SCALE_ARCSEC,
-)
-from target_validation import TARGET_DATABASE, TargetScientificProfile
+try:
+    from data_models import (
+        SPHERExFrame,
+        QualityFlag,
+        SPHEREX_DETECTOR_BANDS,
+        NOMINAL_PIXEL_SCALE_ARCSEC,
+        normalize_quality_flags,
+    )
+except ImportError:
+    from analysis.data_models import (
+        SPHERExFrame,
+        QualityFlag,
+        SPHEREX_DETECTOR_BANDS,
+        NOMINAL_PIXEL_SCALE_ARCSEC,
+        normalize_quality_flags,
+    )
 
 
 # Solid angle of a SPHEREx pixel in steradians (6.2 arcsec on a side)
@@ -67,9 +82,25 @@ def parse_coordinates(
     """
     # Check if input is a known challenge target preset
     preset_key = str(ra_input).strip().upper().replace(" ", "_").replace("'", "")
-    if preset_key in TARGET_DATABASE:
-        prof = TARGET_DATABASE[preset_key]
-        return prof.ra_deg, prof.dec_deg, prof.common_name
+    try:
+        try:
+            from target_validation import TARGET_DATABASE
+        except ImportError:
+            from analysis.target_validation import TARGET_DATABASE
+        if preset_key in TARGET_DATABASE:
+            prof = TARGET_DATABASE[preset_key]
+            return prof.ra_deg, prof.dec_deg, prof.common_name
+    except Exception:
+        challenge_presets = {
+            "WISE_0855": (133.790, -7.240, "WISE J085510.83-071442.5"),
+            "BARNARD_STAR": (269.452, 4.693, "Barnard's Star (GJ 699)"),
+            "EPSILON_INDI_B": (330.840, -56.786, "Epsilon Indi Ba,Bb"),
+            "RW_AUR": (77.108, 30.402, "RW Aurigae A"),
+            "R_DRA": (248.370, 66.702, "R Draconis"),
+        }
+        if preset_key in challenge_presets:
+            ra_p, dec_p, name_p = challenge_presets[preset_key]
+            return ra_p, dec_p, name_p
 
     # Handle float inputs directly
     if isinstance(ra_input, (int, float)) and dec_input is not None and isinstance(dec_input, (int, float)):
@@ -354,9 +385,10 @@ def load_cutout_from_fits(
     cutout_size: int = 25,
 ) -> SPHERExFrame:
     """
-    Open a SPHEREx Level-2 FITS file, convert target sky coordinates (RA, Dec)
-    to pixel coordinates via WCS, extract a 2D cutout across SCI, UNCERT, and MASK
-    extensions, and return a validated SPHERExFrame.
+    Open a SPHEREx Level-2 FITS file (official NASA/IPAC IRSA format or legacy mock),
+    convert target sky coordinates (RA, Dec) to pixel coordinates via WCS, extract
+    a 2D cutout across IMAGE/SCI, FLAGS/MASK, and VARIANCE/UNCERT extensions,
+    correctly convert variance to 1-sigma uncertainty, and return a validated SPHERExFrame.
 
     Parameters:
     -----------
@@ -376,15 +408,69 @@ def load_cutout_from_fits(
         raise FileNotFoundError(f"FITS file not found: {fits_path}")
 
     with fits.open(str(fits_path), memmap=False) as hdul:
-        primary_hdr = hdul[0].header
+        primary_hdr = hdul[0].header if len(hdul) > 0 else fits.Header()
 
-        # Find SCI, UNCERT, MASK HDUs
-        sci_hdu = hdul["SCI"] if "SCI" in hdul else hdul[1]
-        uncert_hdu = hdul["UNCERT"] if "UNCERT" in hdul else (hdul[2] if len(hdul) > 2 else None)
-        mask_hdu = hdul["MASK"] if "MASK" in hdul else (hdul[3] if len(hdul) > 3 else None)
+        # 1. Locate Science Image HDU: Prefer official 'IMAGE', then 'SCI'
+        sci_hdu = None
+        if "IMAGE" in hdul and getattr(hdul["IMAGE"], "data", None) is not None:
+            sci_hdu = hdul["IMAGE"]
+        elif "SCI" in hdul and getattr(hdul["SCI"], "data", None) is not None:
+            sci_hdu = hdul["SCI"]
+        elif len(hdul) > 1 and getattr(hdul[1], "data", None) is not None:
+            h1_name = str(hdul[1].name).upper()
+            if h1_name not in ("FLAGS", "MASK", "VARIANCE", "UNCERT", "ZODI", "EPSF", "WCS-WAVE"):
+                sci_hdu = hdul[1]
+
+        if sci_hdu is None or sci_hdu.data is None or sci_hdu.data.ndim != 2:
+            raise ValueError(
+                f"Could not find a valid 2D science image HDU ('IMAGE' or 'SCI') in {fits_path.name}"
+            )
 
         sci_hdr = sci_hdu.header
         wcs = WCS(sci_hdr)
+
+        # 2. Locate Quality Flags / Mask HDU: Prefer official 'FLAGS', then 'MASK'
+        flags_hdu = None
+        if "FLAGS" in hdul and getattr(hdul["FLAGS"], "data", None) is not None:
+            flags_hdu = hdul["FLAGS"]
+        elif "MASK" in hdul and getattr(hdul["MASK"], "data", None) is not None:
+            flags_hdu = hdul["MASK"]
+        elif len(hdul) > 2 and getattr(hdul[2], "data", None) is not None:
+            h2_name = str(hdul[2].name).upper()
+            if h2_name == "FLAGS":
+                flags_hdu = hdul[2]
+            elif h2_name not in ("UNCERT", "VARIANCE", "ERROR", "SIGMA") and len(hdul) > 3 and str(hdul[3].name).upper() in ("MASK", "FLAGS"):
+                flags_hdu = hdul[3]
+            elif h2_name not in ("UNCERT", "VARIANCE", "ERROR", "SIGMA") and np.issubdtype(hdul[2].data.dtype, np.integer):
+                flags_hdu = hdul[2]
+
+        # 3. Locate Variance / Uncertainty HDU: Prefer official 'VARIANCE', then 'UNCERT'
+        var_uncert_hdu = None
+        is_variance = False
+
+        if "VARIANCE" in hdul and getattr(hdul["VARIANCE"], "data", None) is not None:
+            var_uncert_hdu = hdul["VARIANCE"]
+            is_variance = True
+        elif "UNCERT" in hdul and getattr(hdul["UNCERT"], "data", None) is not None:
+            var_uncert_hdu = hdul["UNCERT"]
+            is_variance = False
+        elif "ERROR" in hdul and getattr(hdul["ERROR"], "data", None) is not None:
+            var_uncert_hdu = hdul["ERROR"]
+            is_variance = False
+        elif "SIGMA" in hdul and getattr(hdul["SIGMA"], "data", None) is not None:
+            var_uncert_hdu = hdul["SIGMA"]
+            is_variance = False
+        else:
+            if sci_hdu.name.upper() == "IMAGE" and len(hdul) > 3 and getattr(hdul[3], "data", None) is not None:
+                h3_name = str(hdul[3].name).upper()
+                if h3_name not in ("FLAGS", "MASK"):
+                    var_uncert_hdu = hdul[3]
+                    is_variance = True
+            elif sci_hdu.name.upper() == "SCI" and len(hdul) > 2 and getattr(hdul[2], "data", None) is not None:
+                h2_name = str(hdul[2].name).upper()
+                if h2_name not in ("FLAGS", "MASK"):
+                    var_uncert_hdu = hdul[2]
+                    is_variance = False
 
         # Convert celestial coordinates to pixel space
         target_coord = SkyCoord(ra=target_ra_deg * u.deg, dec=target_dec_deg * u.deg, frame="icrs")
@@ -393,7 +479,7 @@ def load_cutout_from_fits(
         x_pix = float(x_pix)
         y_pix = float(y_pix)
 
-        # Check if target falls on the detector
+        # Check if target falls within extended detector bounds
         ny, nx = sci_hdu.data.shape
         if not (-cutout_size <= x_pix < nx + cutout_size and -cutout_size <= y_pix < ny + cutout_size):
             raise ValueError(
@@ -401,63 +487,164 @@ def load_cutout_from_fits(
                 f"falls outside detector bounds [{nx} x {ny}] for file {fits_path.name}"
             )
 
-        # Extract 2D Cutout for SCI
+        # Extract 2D Cutout for SCI / IMAGE
         sci_cutout = Cutout2D(
             sci_hdu.data,
             (x_pix, y_pix),
             (cutout_size, cutout_size),
             wcs=wcs,
             mode="partial",
-            fill_value=0.0,
+            fill_value=np.nan,
         )
+        sci_data = sci_cutout.data.astype(np.float64)
 
-        # Extract matching Cutout for UNCERT
-        if uncert_hdu is not None:
-            uncert_cutout = Cutout2D(
-                uncert_hdu.data,
-                (x_pix, y_pix),
-                (cutout_size, cutout_size),
-                mode="partial",
-                fill_value=float(np.nanmedian(uncert_hdu.data)),
-            )
-            uncert_data = uncert_cutout.data
-        else:
-            uncert_data = np.full((cutout_size, cutout_size), 0.15, dtype=np.float32)
-
-        # Extract matching Cutout for MASK
-        if mask_hdu is not None:
+        # Extract matching Cutout for MASK / FLAGS
+        if flags_hdu is not None:
             mask_cutout = Cutout2D(
-                mask_hdu.data,
+                flags_hdu.data,
                 (x_pix, y_pix),
                 (cutout_size, cutout_size),
                 mode="partial",
-                fill_value=int(QualityFlag.EDGE_ARTIFACT),
+                fill_value=0,
             )
-            mask_data = mask_cutout.data.astype(np.int32)
+            raw_flags = mask_cutout.data.astype(np.int32)
+            is_mission = (
+                flags_hdu.name.upper() == "FLAGS"
+                or sci_hdu.name.upper() == "IMAGE"
+                or np.any(raw_flags > 127)
+            )
+            mask_data = normalize_quality_flags(raw_flags, is_mission_flags=is_mission)
         else:
+            raw_flags = None
             mask_data = np.zeros((cutout_size, cutout_size), dtype=np.int32)
 
-        # Read instrument metadata from headers
-        detector_id = int(primary_hdr.get("DETECTOR", sci_hdr.get("DETECTOR", 1)))
-        wavelength_um = float(primary_hdr.get("WAVELEN", sci_hdr.get("WAVELEN", 1.0)))
-        mjd = float(primary_hdr.get("MJD_OBS", sci_hdr.get("MJD-OBS", 60300.0)))
-        exposure_time_s = float(primary_hdr.get("EXPTIME", 120.0))
-        target_name = str(primary_hdr.get("OBJECT", "Unknown_Target"))
-        data_release = str(primary_hdr.get("DATA_REL", "DR1"))
-        flux_unit = str(primary_hdr.get("BUNIT", "MJy/sr"))
+        # Out-of-bounds partial cutout pixel detection
+        cut_yslice, cut_xslice = sci_cutout.slices_cutout
+        inside_mask = np.zeros((cutout_size, cutout_size), dtype=bool)
+        inside_mask[cut_yslice, cut_xslice] = True
+        oob_mask = ~inside_mask
+        if np.any(oob_mask):
+            mask_data[oob_mask] |= int(QualityFlag.EDGE_ARTIFACT | QualityFlag.BAD_PIXEL)
+            sci_data[oob_mask] = np.nan
 
-        # Calculate approximate wavelength FWHM:
-        # Band 1-3: R~41 => FWHM ~ lambda / 41
-        # Band 4: R~35 => FWHM ~ lambda / 35
-        # Band 5: R~110 => FWHM ~ lambda / 110
-        # Band 6: R~130 => FWHM ~ lambda / 130
+        # Identify non-finite science flux and flag as bad pixels
+        non_finite_flux = ~np.isfinite(sci_data)
+        if np.any(non_finite_flux):
+            mask_data[non_finite_flux] |= int(QualityFlag.BAD_PIXEL)
+            sci_data[non_finite_flux] = np.nan
+
+        # Extract matching Cutout for UNCERT / VARIANCE
+        if var_uncert_hdu is not None:
+            var_cutout = Cutout2D(
+                var_uncert_hdu.data,
+                (x_pix, y_pix),
+                (cutout_size, cutout_size),
+                mode="partial",
+                fill_value=np.nan,
+            )
+            raw_var_uncert = var_cutout.data.astype(np.float64)
+
+            if is_variance:
+                # VARIANCE contains sigma^2 in (MJy/sr)^2: convert to 1-sigma uncertainty sigma
+                valid_var = np.isfinite(raw_var_uncert) & (raw_var_uncert >= 0.0)
+                uncert_data = np.full_like(raw_var_uncert, np.nan, dtype=np.float64)
+                uncert_data[valid_var] = np.sqrt(raw_var_uncert[valid_var])
+                mask_data[~valid_var] |= int(QualityFlag.BAD_PIXEL)
+            else:
+                # Already 1-sigma uncertainty
+                valid_uncert = np.isfinite(raw_var_uncert) & (raw_var_uncert >= 0.0)
+                uncert_data = np.full_like(raw_var_uncert, np.nan, dtype=np.float64)
+                uncert_data[valid_uncert] = raw_var_uncert[valid_uncert]
+                mask_data[~valid_uncert] |= int(QualityFlag.BAD_PIXEL)
+        else:
+            uncert_data = np.full((cutout_size, cutout_size), np.nan, dtype=np.float64)
+            mask_data |= int(QualityFlag.CALIBRATION_WARN)
+
+        # Extract detector ID: check header cards, parse strings if necessary
+        detector_id = None
+        raw_det = primary_hdr.get("DETECTOR", sci_hdr.get("DETECTOR", None))
+        if raw_det is not None:
+            if isinstance(raw_det, (int, np.integer)):
+                detector_id = int(raw_det)
+            else:
+                m = re.search(r"(\d+)", str(raw_det))
+                if m:
+                    detector_id = int(m.group(1))
+
+        if detector_id is None or detector_id not in SPHEREX_DETECTOR_BANDS:
+            # Fallback: check filename for detector pattern (e.g. SPHEREx-D6)
+            m_fn = re.search(r"SPHEREx-D(\d)", fits_path.name, re.IGNORECASE)
+            if m_fn:
+                detector_id = int(m_fn.group(1))
+            else:
+                detector_id = 1
+
+        # Extract central wavelength in micrometers and record provenance
+        wavelength_um = None
+        wavelength_source = "NOMINAL_BANDPASS_MIDPOINT"
+
+        raw_wave = primary_hdr.get(
+            "WAVELEN", sci_hdr.get("WAVELEN", sci_hdr.get("CWAVE", primary_hdr.get("CWAVE", None)))
+        )
+        if raw_wave is not None:
+            try:
+                val = float(raw_wave)
+                if val > 0:
+                    wavelength_um = val
+                    wavelength_source = "FITS_HEADER"
+            except (ValueError, TypeError):
+                wavelength_um = None
+
+        if wavelength_um is None and "EPSF" in hdul and getattr(hdul["EPSF"], "data", None) is not None:
+            epsf_data = hdul["EPSF"].data
+            if hasattr(epsf_data, "names") and "CWAVE" in epsf_data.names:
+                try:
+                    val = float(epsf_data["CWAVE"][0])
+                    if val > 0:
+                        wavelength_um = val
+                        wavelength_source = "EPSF_TABLE"
+                except (IndexError, ValueError, TypeError):
+                    wavelength_um = None
+
+        # Verify wavelength is within physical bandpass of detector; if not, use band midpoint
+        det_min, det_max = SPHEREX_DETECTOR_BANDS[detector_id]
+        if wavelength_um is None or not ((det_min - 0.10) <= wavelength_um <= (det_max + 0.10)):
+            wavelength_um = (det_min + det_max) / 2.0
+            wavelength_source = "NOMINAL_BANDPASS_MIDPOINT"
+            mask_data |= int(QualityFlag.CALIBRATION_WARN)
+
+        # Read observation epoch, timing, and units
+        raw_mjd = primary_hdr.get(
+            "MJD_OBS",
+            sci_hdr.get("MJD-OBS", sci_hdr.get("MJD_OBS", primary_hdr.get("MJD-OBS", 60300.0))),
+        )
+        try:
+            mjd = float(raw_mjd)
+        except (ValueError, TypeError):
+            mjd = 60300.0
+
+        raw_exp = primary_hdr.get("EXPTIME", sci_hdr.get("EXPTIME", 120.0))
+        try:
+            exposure_time_s = float(raw_exp)
+        except (ValueError, TypeError):
+            exposure_time_s = 120.0
+
+        target_name = str(primary_hdr.get("OBJECT", sci_hdr.get("OBJECT", "Unknown_Target")))
+        data_release = str(primary_hdr.get("DATA_REL", sci_hdr.get("DATA_REL", "DR1")))
+        flux_unit = str(primary_hdr.get("BUNIT", sci_hdr.get("BUNIT", "MJy/sr"))).strip()
+
+        # Calculate approximate wavelength resolution and FWHM:
         res_power = {1: 41.0, 2: 41.0, 3: 41.0, 4: 35.0, 5: 110.0, 6: 130.0}.get(detector_id, 41.0)
         wavelength_fwhm_um = wavelength_um / res_power
 
-        # Formulate standardized SPHERExFrame
+        frame_flags = int(QualityFlag.GOOD)
+        if wavelength_source == "NOMINAL_BANDPASS_MIDPOINT" or var_uncert_hdu is None:
+            frame_flags |= int(QualityFlag.CALIBRATION_WARN)
+
+        # Formulate standardized SPHERExFrame with normalized mask and raw_flags
         frame = SPHERExFrame(
-            data=sci_cutout.data.astype(np.float64),
-            uncertainty=uncert_data.astype(np.float64),
+            data=sci_data,
+            uncertainty=uncert_data,
             mask=mask_data,
             frame_id=f"SPHEREX_{fits_path.stem}",
             mjd=mjd,
@@ -472,14 +659,23 @@ def load_cutout_from_fits(
             flux_unit=flux_unit,
             exposure_time_s=exposure_time_s,
             data_release=data_release,
-            frame_quality_flags=QualityFlag.GOOD,
+            frame_quality_flags=frame_flags,
             additional_metadata={
                 "fits_source": str(fits_path),
                 "target_name": target_name,
                 "center_pixel_x": float(sci_cutout.center_cutout[0]),
                 "center_pixel_y": float(sci_cutout.center_cutout[1]),
                 "original_detector_pixel": (x_pix, y_pix),
+                "wcs": sci_cutout.wcs,
+                "has_variance_hdu": is_variance,
+                "sci_hdu_name": sci_hdu.name,
+                "flags_hdu_name": flags_hdu.name if flags_hdu is not None else None,
+                "uncert_hdu_name": var_uncert_hdu.name if var_uncert_hdu is not None else None,
+                "wavelength_source": wavelength_source,
+                "is_wavelength_measured": (wavelength_source != "NOMINAL_BANDPASS_MIDPOINT"),
+                "raw_flags": raw_flags,
             },
+            raw_flags=raw_flags,
         )
         return frame
 
@@ -567,7 +763,14 @@ def plot_fits_inspection(
     n_sat = np.sum((frame.mask & int(QualityFlag.SATURATED)) > 0)
     n_bad = np.sum((frame.mask & int(QualityFlag.BAD_PIXEL)) > 0)
     n_cr = np.sum((frame.mask & int(QualityFlag.COSMIC_RAY)) > 0)
-    flag_summary = f"Flags:\n- Good: {frame.mask.size - n_sat - n_bad - n_cr}\n- Saturated: {n_sat}\n- Bad Pixels: {n_bad}\n- Cosmic Rays: {n_cr}"
+    n_edge = np.sum((frame.mask & int(QualityFlag.EDGE_ARTIFACT)) > 0)
+    n_sources = np.sum((frame.raw_flags & (1 << 21)) > 0) if frame.raw_flags is not None else 0
+    extra_src = f"\n- Catalog Sources: {n_sources}" if n_sources > 0 else ""
+    extra_edge = f"\n- Edge Artifacts: {n_edge}" if n_edge > 0 else ""
+    flag_summary = (
+        f"Flags:\n- Good: {frame.mask.size - n_sat - n_bad - n_cr - n_edge}\n"
+        f"- Saturated: {n_sat}\n- Bad Pixels: {n_bad}\n- Cosmic Rays: {n_cr}{extra_edge}{extra_src}"
+    )
     axes[2].text(
         0.05, 0.95, flag_summary,
         transform=axes[2].transAxes,

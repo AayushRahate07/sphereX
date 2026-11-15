@@ -263,5 +263,65 @@ def test_get_frames_votable_tap_response_end_to_end(tmp_path: Path, synthetic_fi
         assert response.status_code == 200
         data = response.json()
         assert data["frameCount"] == 1
-        assert data["frames"][0]["obsId"] == "SYNTH_EPOCH1"
-        assert len(data["frames"][0]["flux"]) == 841
+        assert data["fovDegrees"] == pytest.approx(0.25)
+        assert data["frames"][0]["width"] == 146
+        assert data["frames"][0]["height"] == 146
+        assert len(data["frames"][0]["flux"]) == 146 * 146
+
+
+def test_get_frames_fov_parameter_validation():
+    """Verify that field-of-view parameter 'size' enforces strict bounds [0.01, 0.50]."""
+    # Below lower bound (size < 0.01)
+    resp_small = client.get("/api/frames?ra=133.795&dec=-7.245&band=SPHEREx-D6&size=0.005")
+    assert resp_small.status_code == 422
+
+    # Above upper bound (size > 0.50)
+    resp_large = client.get("/api/frames?ra=133.795&dec=-7.245&band=SPHEREx-D6&size=0.60")
+    assert resp_large.status_code == 422
+
+
+def test_get_frames_fov_dimensions_handling(tmp_path: Path, synthetic_fits_epoch1: fits.HDUList):
+    """Verify that requesting different valid field-of-view sizes creates matching WCS grids."""
+    f1_path = tmp_path / "epoch1.fits"
+    synthetic_fits_epoch1.writeto(f1_path)
+
+    obs1 = SelectedObservation(
+        obs_id="SYNTH_FOV_1",
+        band="SPHEREx-D6",
+        mjd=60800.1,
+        exptime=113.6,
+        access_url="mock_url",
+        s_ra=133.795,
+        s_dec=-7.245,
+    )
+
+    with patch("backend.app.routers.frames.select_observations_for_target", return_value=[obs1]), \
+         patch("backend.app.routers.frames.batch_retrieve_cutouts", return_value={"SYNTH_FOV_1": f1_path}):
+
+        # 1. Explicit 0.05 deg -> 29x29
+        resp_005 = client.get("/api/frames?ra=133.795129&dec=-7.245147&band=SPHEREx-D6&size=0.05&max_frames=1")
+        assert resp_005.status_code == 200
+        d_005 = resp_005.json()
+        assert d_005["fovDegrees"] == pytest.approx(0.05)
+        assert d_005["frames"][0]["width"] == 29
+        assert d_005["frames"][0]["height"] == 29
+        assert len(d_005["frames"][0]["flux"]) == 841
+
+        # 2. Default (no size parameter) -> 0.25 deg -> 146x146
+        resp_default = client.get("/api/frames?ra=133.795129&dec=-7.245147&band=SPHEREx-D6&max_frames=1")
+        assert resp_default.status_code == 200
+        d_default = resp_default.json()
+        assert d_default["fovDegrees"] == pytest.approx(0.25)
+        assert d_default["frames"][0]["width"] == 146
+        assert d_default["frames"][0]["height"] == 146
+        assert len(d_default["frames"][0]["flux"]) == 146 * 146
+
+        # 3. Explicit 0.50 deg -> 292x292
+        resp_050 = client.get("/api/frames?ra=133.795129&dec=-7.245147&band=SPHEREx-D6&size=0.50&max_frames=1")
+        assert resp_050.status_code == 200
+        d_050 = resp_050.json()
+        assert d_050["fovDegrees"] == pytest.approx(0.50)
+        assert d_050["frames"][0]["width"] == 292
+        assert d_050["frames"][0]["height"] == 292
+        assert len(d_050["frames"][0]["flux"]) == 292 * 292
+

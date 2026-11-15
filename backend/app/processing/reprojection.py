@@ -144,17 +144,19 @@ def reproject_observation_to_grid(
     # Convert input 32-bit flags into binary mask (0 = clean, 1 = invalid)
     in_clean_mask = create_binary_quality_mask(in_flags)
 
-    # Resample binary mask using nearest-neighbor (order=0)
+    # Resample binary mask using bilinear interpolation (order=1).
+    # If any surrounding input pixel contributing to an interpolated pixel has a fatal flag,
+    # the output pixel is flagged invalid (> 1e-4) to prevent cosmic ray / bad pixel bleed into clean science data.
     reprojected_flags = scipy.ndimage.map_coordinates(
         in_clean_mask.astype(np.float64),
         [y_in, x_in],
-        order=0,
+        order=1,
         mode="constant",
         cval=1.0,
     )
 
     # Combine out-of-bounds, NaNs, and resampled flags
-    final_flags = (reprojected_flags > 0.5) | out_of_bounds | np.isnan(reprojected_flux) | np.isinf(reprojected_flux)
+    final_flags = (reprojected_flags > 1e-4) | out_of_bounds | np.isnan(reprojected_flux) | np.isinf(reprojected_flux)
     final_flags_uint8 = final_flags.astype(np.uint8)
 
     # 7. Resample Variance (if available)

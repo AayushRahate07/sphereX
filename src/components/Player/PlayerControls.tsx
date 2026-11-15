@@ -127,38 +127,50 @@ export const PlayerControls: React.FC<PlayerControlsProps> = ({
 
       {/* Bottom row: Playback Speed & Loop Mode */}
       <div className="flex items-center justify-between border-t border-neutral-800/80 pt-3 text-xs text-neutral-400">
-        <div className="flex items-center gap-4">
+        <div className="flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-2">
-            <span>Speed:</span>
+            <span>Interval:</span>
             <input
               type="range"
-              min={1}
-              max={20}
-              step={1}
-              value={fps}
-              onChange={(e) => onFpsChange(Number(e.target.value))}
-              className="w-24 h-1.5 bg-neutral-800 rounded-lg appearance-none cursor-pointer"
+              min={250}
+              max={3500}
+              step={50}
+              value={Math.round(1000 / Math.max(0.01, fps))}
+              onChange={(e) => onFpsChange(1000 / Math.max(1, Number(e.target.value)))}
+              className="w-28 h-1.5 bg-neutral-800 rounded-lg appearance-none cursor-pointer"
             />
-            <span className="font-mono text-neutral-200 font-medium min-w-[45px]">
-              {fps} fps
+            <span className="font-mono text-neutral-200 font-medium min-w-[125px]">
+              {Math.round(1000 / Math.max(0.01, fps))} ms ({fps < 1 ? fps.toFixed(2) : fps % 1 === 0 ? fps : fps.toFixed(1)} fps)
             </span>
           </div>
 
-          {/* Quick FPS Presets */}
+          {/* Quick Interval Presets */}
           <div className="flex items-center gap-1">
-            {[1, 2, 4, 8, 15].map((speed) => (
-              <button
-                key={speed}
-                onClick={() => onFpsChange(speed)}
-                className={`px-1.5 py-0.5 rounded text-[11px] font-mono transition ${
-                  fps === speed
-                    ? 'bg-neutral-700 text-cyan-300 font-semibold'
-                    : 'bg-neutral-800/60 hover:bg-neutral-800 text-neutral-400'
-                }`}
-              >
-                {speed}x
-              </button>
-            ))}
+            {[
+              { label: '3000ms', intervalMs: 3000, fps: 1000 / 3000, title: '3000 ms / frame (0.33 fps)' },
+              { label: '2500ms', intervalMs: 2500, fps: 1000 / 2500, title: '2500 ms / frame (0.40 fps)' },
+              { label: '2000ms', intervalMs: 2000, fps: 0.5, title: '2000 ms / frame (0.50 fps - Default)' },
+              { label: '1500ms', intervalMs: 1500, fps: 1000 / 1500, title: '1500 ms / frame (0.67 fps)' },
+              { label: '1000ms', intervalMs: 1000, fps: 1.0, title: '1000 ms / frame (1.0 fps)' },
+              { label: '500ms', intervalMs: 500, fps: 2.0, title: 'Fast blink (500 ms / frame)' },
+            ].map((preset) => {
+              const currentMs = Math.round(1000 / Math.max(0.01, fps));
+              const isActive = Math.abs(currentMs - preset.intervalMs) <= 30;
+              return (
+                <button
+                  key={preset.label}
+                  onClick={() => onFpsChange(preset.fps)}
+                  title={preset.title}
+                  className={`px-1.5 py-0.5 rounded text-[11px] font-mono transition ${
+                    isActive
+                      ? 'bg-neutral-700 text-cyan-300 font-semibold'
+                      : 'bg-neutral-800/60 hover:bg-neutral-800 text-neutral-400'
+                  }`}
+                >
+                  {preset.label}
+                </button>
+              );
+            })}
           </div>
         </div>
 
